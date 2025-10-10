@@ -9,7 +9,7 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(name = "rusty_sand")]
 #[command(author = "GuestAUser")]
-#[command(version = "0.1.0")]
+#[command(version = "1.0.0")]
 #[command(about = "Advanced Windows sandbox with Host Intrusion Prevention System (HIPS)")]
 #[command(long_about = "Rusty Sand - nice executable sandbox for security analysis
 
@@ -229,7 +229,7 @@ fn print_banner() {
     println!("{}", "║                                                                 ║".bright_cyan().bold());
     println!("{}", "║                       🏖️  RUSTY SAND  🏖️                         ".bright_cyan().bold());
     println!("{}", "║                                                                 ║".bright_cyan().bold());
-    println!("{}", "║               Clean Windows Sandbox & HIPS v0.1.0               ║".bright_cyan());
+    println!("{}", "║               Clean Windows Sandbox & HIPS v1.0.0               ║".bright_cyan());
     println!("{}", "║                                                                 ║".bright_cyan());
     println!("{}", "║  Features: Process Isolation • HIPS Control • Threat Detection  ║".bright_cyan());
     println!("{}", "║            Real-time Monitoring • Behavioral Analysis           ║".bright_cyan());
