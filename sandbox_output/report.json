@@ -1,0 +1,124 @@
+{
+  "executable": ".\\test\\rusty_demo_virus.exe",
+  "start_time": "2025-10-10T15:44:00.734426300Z",
+  "end_time": "2025-10-10T15:44:44.888016400Z",
+  "duration_seconds": 44,
+  "events": [
+    {
+      "timestamp": "2025-10-10T15:44:00.734591200Z",
+      "event_type": "SandboxStarted",
+      "details": "Sandbox initialized"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:03.623797600Z",
+      "event_type": "ProcessCreated",
+      "details": "Child process created: PID 15336 (conhost.exe)"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.047626100Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_1.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.047681400Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_1.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.048194400Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_2.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.048226700Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_2.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.048486300Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_3.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.048543800Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_3.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.048753200Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_4.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.048791700Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_4.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.049007200Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_5.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.049051200Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_5.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.049285200Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\definitely_not_malware.exe.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:06.049326500Z",
+      "event_type": "FileModified",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\definitely_not_malware.exe.txt"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:29.064991700Z",
+      "event_type": "NetworkBlocked",
+      "details": "TCP: 192.168.1.7:53662 -> 23.220.75.245:80"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:29.281951300Z",
+      "event_type": "NetworkBlocked",
+      "details": "TCP: 192.168.1.7:53663 -> 142.250.219.14:80"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:31.235882700Z",
+      "event_type": "NetworkBlocked",
+      "details": "TCP: 192.168.1.7:53664 -> 1.1.1.1:80"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:32.370216800Z",
+      "event_type": "FileDeleted",
+      "details": "C:\\Users\\Davi\\AppData\\Local\\Temp\\2d31a1ce-4f35-4ce6-9f24-eaf2e6064f63.tmp"
+    },
+    {
+      "timestamp": "2025-10-10T15:44:44.888011300Z",
+      "event_type": "SandboxStopped",
+      "details": "Process execution completed"
+    }
+  ],
+  "exit_code": 0,
+  "config": {
+    "allow_internet": false,
+    "allow_dns": false,
+    "allow_registry": true,
+    "timeout": {
+      "secs": 300,
+      "nanos": 0
+    },
+    "working_dir": null,
+    "allowed_file_patterns": [],
+    "max_memory_mb": 1024,
+    "max_cpu_time": 300,
+    "verbose": false,
+    "log_network_packets": false,
+    "enable_api_hooks": true,
+    "interactive_mode": true,
+    "enable_behavior_detection": true,
+    "auto_terminate_on_critical": false,
+    "output_dir": "./sandbox_output"
+  }
+}

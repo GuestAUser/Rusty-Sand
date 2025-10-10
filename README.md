@@ -227,41 +227,41 @@ rusty_sand.exe --help
 
 ## 🎯 Interactive Mode (HIPS)
 
-When running with API hooks enabled (default), Rusty Sand intercepts operations **before execution** and prompts:
+When running with API hooks enabled (default), Rusty Sand intercepts operations **before execution** and prompts in real-time:
 
 ```
-╔═══════════════════════════════════════════════════════════════╗
-║                  🔍 OPERATION DETECTED 🔍
-╚═══════════════════════════════════════════════════════════════╝
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️  INTERCEPTED OPERATION #5
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📁 Operation Type: FolderCreated
-   Risk Level:      MEDIUM RISK
-   Details:         C:\ProgramData\SuspiciousFolder
-   Time:            14:32:15 UTC
+  ACTION: CREATE FOLDER
+  TARGET: C:\ProgramData\SuspiciousApp
 
-┌─ Session Statistics ──────────────────────────────────────────┐
-│  Prompts:   12  │  Allowed:   8  │  Blocked:   3
-└───────────────────────────────────────────────────────────────┘
+  🛑 BLOCKED - Waiting for your decision...
 
-Options:
-  [A]   Allow this operation
-  [AA]  Allow ALL FolderCreated operations (no more prompts)
-  [B]   Block this operation
-  [BB]  Block ALL FolderCreated operations (auto-block)
-  [T]   Terminate process immediately
-  [C]   Continue without asking about this type
-
-Your decision:
+  [Y]es / [A]llow All / [N]o / [D]eny All / [T]erminate >
 ```
 
 ### Decision Options
 
-- **[A] Allow** - Allow this single operation, call original API
-- **[AA] Allow All** - Auto-allow all future operations of this type
-- **[B] Block** - Block this operation (return error to target)
-- **[BB] Block All** - Auto-block all future operations of this type
-- **[T] Terminate** - Kill the process immediately
-- **[C] Continue** - Skip prompting for this event type
+When an operation is intercepted:
+
+- **[Y]es** - Allow this single operation (calls original API)
+- **[A]llow All** - Auto-allow ALL future operations of this type (no more prompts)
+- **[N]o** - Block this single operation (returns error to target)
+- **[D]eny All** - Auto-block ALL future operations of this type (no more prompts)
+- **[T]erminate** - Immediately kill the entire process
+
+**If you choose [N]o**, you'll see a follow-up prompt:
+
+```
+  🚫 BLOCKED
+
+  [C]ontinue / [T]erminate >
+```
+
+- **[C]ontinue** - Continue monitoring the process
+- **[T]erminate** - Kill the process immediately
 
 ---
 
@@ -509,6 +509,10 @@ MIT License - See LICENSE file for details.
 **For defensive security research only. The authors are not responsible for misuse.**
 
 ---
+
+## 👥 Authors
+
+- **GuestAUser** - Creator and primary developer
 
 ## 🙏 Acknowledgments
 
