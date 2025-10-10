@@ -181,7 +181,7 @@ async fn main() -> Result<()> {
 
     // Inform user about separate console window
     println!("{}", "╔═══════════════════════════════════════════════════════╗".bright_cyan().bold());
-    println!("{}", "║              📺 CONSOLE SEPARATION 📺                 ║".bright_cyan().bold());
+    println!("{}", "║              📺 CONSOLE SEPARATION 📺                 ".bright_cyan().bold());
     println!("{}", "╚═══════════════════════════════════════════════════════╝".bright_cyan().bold());
     println!();
     println!("{}",  "  ℹ️  The target process will open in a SEPARATE window.".bright_blue());
@@ -229,7 +229,7 @@ fn print_banner() {
     println!("{}", "║                                                                 ║".bright_cyan().bold());
     println!("{}", "║                       🏖️  RUSTY SAND  🏖️                         ".bright_cyan().bold());
     println!("{}", "║                                                                 ║".bright_cyan().bold());
-    println!("{}", "║         Professional Windows Sandbox & HIPS v0.1.0              ║".bright_cyan());
+    println!("{}", "║               Clean Windows Sandbox & HIPS v0.1.0               ║".bright_cyan());
     println!("{}", "║                                                                 ║".bright_cyan());
     println!("{}", "║  Features: Process Isolation • HIPS Control • Threat Detection  ║".bright_cyan());
     println!("{}", "║            Real-time Monitoring • Behavioral Analysis           ║".bright_cyan());
