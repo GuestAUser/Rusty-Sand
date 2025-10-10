@@ -1,0 +1,69 @@
+[workspace]
+members = [".", "rusty_sand_hooks"]
+resolver = "2"
+
+[package]
+name = "rusty_sand"
+version = "0.1.0"
+edition = "2021"
+authors = ["Security Research Team"]
+description = "Executable sandbox for security analysis - monitor processes in isolated environments"
+license = "MIT"
+
+[dependencies]
+# CLI and config
+clap = { version = "4.5", features = ["derive", "cargo"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Windows API
+windows = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",     # For LoadLibraryW (DLL injection)
+    "Win32_System_Pipes",              # For Named Pipes (IPC)
+    "Win32_Storage_FileSystem",        # File operations for pipes
+] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Monitoring
+notify = "6.1"
+sysinfo = "0.30"
+
+# Logging and errors
+log = "0.4"
+env_logger = "0.11"
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal UI
+colored = "2.1"
+indicatif = "0.17"
+
+# Note: API hooking is now implemented in the separate rusty_sand_hooks DLL crate
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
