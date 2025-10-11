@@ -76,14 +76,36 @@ impl FileSystemMonitor {
     }
 
     async fn handle_fs_event(&self, event: notify::Event) {
-        let event_type = match event.kind {
-            EventKind::Create(_) => EventType::FileCreated,
-            EventKind::Modify(_) => EventType::FileModified,
-            EventKind::Remove(_) => EventType::FileDeleted,
-            _ => return,
-        };
-
         for path in event.paths {
+            // Determine if this is a file or directory
+            let is_dir = path.is_dir();
+
+            let event_type = match event.kind {
+                EventKind::Create(_) => {
+                    if is_dir {
+                        EventType::FolderCreated
+                    } else {
+                        EventType::FileCreated
+                    }
+                }
+                EventKind::Modify(_) => {
+                    // Skip directory modifications (too noisy)
+                    if is_dir {
+                        continue;
+                    }
+                    EventType::FileModified
+                }
+                EventKind::Remove(_) => {
+                    // Check metadata from event attributes if path no longer exists
+                    if is_dir {
+                        EventType::FolderDeleted
+                    } else {
+                        EventType::FileDeleted
+                    }
+                }
+                _ => continue,
+            };
+
             let details = format!("{}", path.display());
 
             if self.config.verbose {
@@ -92,7 +114,7 @@ impl FileSystemMonitor {
 
             let ev = Event {
                 timestamp: chrono::Utc::now(),
-                event_type: event_type.clone(),
+                event_type,
                 details,
             };
 

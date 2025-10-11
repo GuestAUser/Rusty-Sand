@@ -1,0 +1,124 @@
+{
+  "executable": ".\\test\\rusty_demo_virus.exe",
+  "start_time": "2025-10-11T01:41:38.237145800Z",
+  "end_time": "2025-10-11T01:42:44.245224100Z",
+  "duration_seconds": 66,
+  "events": [
+    {
+      "timestamp": "2025-10-11T01:41:38.237351900Z",
+      "event_type": "SandboxStarted",
+      "details": "Sandbox initialized"
+    },
+    {
+      "timestamp": "2025-10-11T01:41:51.921405400Z",
+      "event_type": "ProcessCreated",
+      "details": "Child process created: PID 22512 (conhost.exe)"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:03.284112800Z",
+      "event_type": "HookFolderCreate",
+      "details": "🚫 BLOCKED: CREATE FOLDER - C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:10.481336300Z",
+      "event_type": "HookFileWrite",
+      "details": "🚫 BLOCKED: WRITE FILE - C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_1.txt"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:10.481537800Z",
+      "event_type": "HookFileWrite",
+      "details": "🚫 BLOCKED: WRITE FILE - C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_2.txt"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:10.481662700Z",
+      "event_type": "HookFileWrite",
+      "details": "🚫 BLOCKED: WRITE FILE - C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_3.txt"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:10.481762400Z",
+      "event_type": "HookFileWrite",
+      "details": "🚫 BLOCKED: WRITE FILE - C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_4.txt"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:10.481884100Z",
+      "event_type": "HookFileWrite",
+      "details": "🚫 BLOCKED: WRITE FILE - C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\test_file_5.txt"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:10.481976700Z",
+      "event_type": "HookFileWrite",
+      "details": "🚫 BLOCKED: WRITE FILE - C:\\Users\\Davi\\AppData\\Local\\Temp\\rusty_demo_virus_test\\definitely_not_malware.exe.txt"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:23.176482800Z",
+      "event_type": "HookNetworkConnect",
+      "details": "✅ ALLOWED: NETWORK CONNECT - 23.192.228.84:80"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:23.255791900Z",
+      "event_type": "NetworkBlocked",
+      "details": "TCP: 192.168.1.7:60434 -> 23.192.228.84:80"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:23.374899Z",
+      "event_type": "HookNetworkConnect",
+      "details": "✅ ALLOWED: NETWORK CONNECT - 142.251.132.46:80"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:23.380337500Z",
+      "event_type": "NetworkBlocked",
+      "details": "TCP: 192.168.1.7:60435 -> 142.251.132.46:80"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:25.369736600Z",
+      "event_type": "HookNetworkConnect",
+      "details": "✅ ALLOWED: NETWORK CONNECT - 1.1.1.1:80"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:25.490388Z",
+      "event_type": "NetworkBlocked",
+      "details": "TCP: 192.168.1.7:60436 -> 1.1.1.1:80"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:32.923973Z",
+      "event_type": "HookRegistryOpen",
+      "details": "🚫 BLOCKED: OPEN REGISTRY - HKEY_-2147483646\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:40.706743600Z",
+      "event_type": "HookRegistryOpen",
+      "details": "🚫 BLOCKED: OPEN REGISTRY - HKEY_-2147483647\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:40.758280100Z",
+      "event_type": "HighCpuUsage",
+      "details": "Process using 100.00% CPU"
+    },
+    {
+      "timestamp": "2025-10-11T01:42:44.245215500Z",
+      "event_type": "SandboxStopped",
+      "details": "Process execution completed"
+    }
+  ],
+  "exit_code": 0,
+  "config": {
+    "allow_internet": false,
+    "allow_dns": false,
+    "allow_registry": true,
+    "timeout": {
+      "secs": 300,
+      "nanos": 0
+    },
+    "working_dir": null,
+    "allowed_file_patterns": [],
+    "max_memory_mb": 1024,
+    "max_cpu_time": 300,
+    "verbose": false,
+    "log_network_packets": false,
+    "enable_api_hooks": true,
+    "interactive_mode": true,
+    "enable_behavior_detection": true,
+    "auto_terminate_on_critical": false,
+    "output_dir": "./sandbox_output"
+  }
+}

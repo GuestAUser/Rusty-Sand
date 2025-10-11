@@ -42,6 +42,23 @@ pub enum EventType {
     DnsQuery,
     ApiCall,
     Suspicious,
+    HighMemoryUsage,
+    HighCpuUsage,
+    ResourceLimitReached,
+    // Hook interception events (logged regardless of allow/deny decision)
+    HookFileCreate,
+    HookFileWrite,
+    HookFileDelete,
+    HookFolderCreate,
+    HookFolderDelete,
+    HookRegistrySet,
+    HookRegistryDelete,
+    HookRegistryRead,
+    HookRegistryOpen,
+    HookNetworkConnect,
+    HookProcessCreate,
+    // Blocked by hook (user denied)
+    HookBlocked,
 }
 
 impl SandboxReport {
@@ -92,20 +109,32 @@ impl SandboxReport {
 
         // Event statistics
         let mut file_ops = 0;
+        let mut folder_ops = 0;
         let mut network_ops = 0;
         let mut network_blocked = 0;
         let mut process_ops = 0;
         let mut registry_ops = 0;
+        let mut hook_blocked = 0;
 
         for event in &self.events {
             match event.event_type {
                 EventType::FileCreated | EventType::FileModified | EventType::FileDeleted => {
                     file_ops += 1
                 }
+                EventType::FolderCreated | EventType::FolderDeleted => {
+                    folder_ops += 1
+                }
+                EventType::HookFileCreate | EventType::HookFileWrite | EventType::HookFileDelete => {
+                    file_ops += 1
+                }
+                EventType::HookFolderCreate | EventType::HookFolderDelete => {
+                    folder_ops += 1
+                }
                 EventType::NetworkConnection => network_ops += 1,
-                EventType::NetworkBlocked => network_blocked += 1,
-                EventType::ProcessCreated => process_ops += 1,
-                EventType::RegistryAccess => registry_ops += 1,
+                EventType::NetworkBlocked | EventType::HookNetworkConnect => network_blocked += 1,
+                EventType::ProcessCreated | EventType::HookProcessCreate => process_ops += 1,
+                EventType::RegistryAccess | EventType::HookRegistrySet | EventType::HookRegistryDelete | EventType::HookRegistryRead | EventType::HookRegistryOpen => registry_ops += 1,
+                EventType::HookBlocked => hook_blocked += 1,
                 _ => {}
             }
         }
@@ -113,6 +142,9 @@ impl SandboxReport {
         println!("\n{}", "📊 EVENT SUMMARY".bright_yellow().bold());
         println!("  Total Events:        {}", self.events.len());
         println!("  File Operations:     {}", file_ops);
+        if folder_ops > 0 {
+            println!("  Folder Operations:   {}", folder_ops);
+        }
         println!("  Network Connections: {}", network_ops);
         if network_blocked > 0 {
             println!(
@@ -122,6 +154,12 @@ impl SandboxReport {
         }
         println!("  Process Created:     {}", process_ops);
         println!("  Registry Access:     {}", registry_ops);
+        if hook_blocked > 0 {
+            println!(
+                "  Operations Blocked:  {}",
+                format!("{} 🛡️", hook_blocked).bright_yellow()
+            );
+        }
 
         // Show all events (or limit to last 100 if too many)
         if !self.events.is_empty() {
@@ -137,11 +175,27 @@ impl SandboxReport {
                     EventType::FileCreated => "📄",
                     EventType::FileModified => "✏️",
                     EventType::FileDeleted => "🗑️",
+                    EventType::FolderCreated => "📁",
+                    EventType::FolderDeleted => "🗂️",
                     EventType::NetworkConnection => "🌐",
                     EventType::NetworkBlocked => "🚫",
                     EventType::ProcessCreated => "⚙️",
+                    EventType::ProcessTerminated => "💀",
                     EventType::RegistryAccess => "📋",
                     EventType::Suspicious => "⚠️",
+                    // Hook interception events (show what was intercepted)
+                    EventType::HookFileCreate => "🎣",
+                    EventType::HookFileWrite => "🎣",
+                    EventType::HookFileDelete => "🎣",
+                    EventType::HookFolderCreate => "🎣",
+                    EventType::HookFolderDelete => "🎣",
+                    EventType::HookRegistrySet => "🎣",
+                    EventType::HookRegistryDelete => "🎣",
+                    EventType::HookRegistryRead => "🎣",
+                    EventType::HookRegistryOpen => "🎣",
+                    EventType::HookNetworkConnect => "🎣",
+                    EventType::HookProcessCreate => "🎣",
+                    EventType::HookBlocked => "🛡️",
                     _ => "•",
                 };
 

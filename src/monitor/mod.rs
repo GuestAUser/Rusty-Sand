@@ -59,9 +59,10 @@ impl MonitoringEngine {
             let controller_ipc = self.interactive_controller.clone();
             let config_ipc = self.config.clone();
             let shutdown_ipc = shutdown.clone();
+            let events_ipc = self.events.clone();  // NEW: Pass events for logging
 
             let task = tokio::spawn(async move {
-                Self::ipc_server_loop(controller_ipc, config_ipc, shutdown_ipc).await
+                Self::ipc_server_loop(controller_ipc, config_ipc, shutdown_ipc, events_ipc).await
             });
 
             // Give IPC server time to start listening
@@ -139,14 +140,17 @@ impl MonitoringEngine {
             proc_handle.process_id,
         )?;
 
-        // Start OLD registry monitoring (passive)
+        // Start OLD registry monitoring (passive) - DEPRECATED, keeping for compatibility
         let reg_monitor = registry::RegistryMonitor::new(
             self.config.clone(),
             self.events.clone(),
         )?;
 
-        // NOTE: Real-time registry monitoring disabled - uses blocking calls that prevent clean shutdown
-        // API hooks provide real-time prevention, so passive registry logging is not critical
+        // Start NEW real-time registry monitoring with shutdown support
+        let real_reg_monitor = etw_registry::RealRegistryMonitor::new(
+            self.events.clone(),
+            shutdown.clone(),
+        );
 
         // Start process monitoring
         let proc_monitor = process::ProcessMonitor::new(
@@ -167,9 +171,10 @@ impl MonitoringEngine {
             reg_monitor.start().await
         });
 
-        // NOTE: Disabled real_reg_task - it uses blocking registry API calls that prevent clean shutdown
-        // Since we have API hooks for real-time prevention, passive registry logging is not critical
-        // If needed in future, would require implementing proper shutdown signaling for blocking calls
+        // Start REAL registry monitoring with shutdown support (NOW ENABLED!)
+        let real_reg_task = tokio::spawn(async move {
+            real_reg_monitor.monitor().await
+        });
 
         let proc_task = tokio::spawn(async move {
             proc_monitor.monitor().await
@@ -242,6 +247,7 @@ impl MonitoringEngine {
         fs_task.abort();
         net_task.abort();
         reg_task.abort();
+        real_reg_task.abort();
         proc_task.abort();
         analysis_task.abort();
         if let Some(task) = ipc_task {
@@ -436,10 +442,13 @@ impl MonitoringEngine {
     ///
     /// This loop listens for API hook requests from the DLL and prompts the user
     /// for approval, implementing TRUE real-time prevention.
+    ///
+    /// CRITICAL: Now logs ALL hook interceptions as events (allowed OR denied)
     async fn ipc_server_loop(
         _interactive_controller: Arc<Mutex<InteractiveController>>,
         config: SandboxConfig,
         shutdown: Arc<AtomicBool>,
+        events: Arc<Mutex<Vec<Event>>>,  // NEW: Event logging
     ) {
         use crate::ipc::{HookIpcServer, HookOperation, HookResponse};
         use std::collections::HashMap;
@@ -586,6 +595,35 @@ impl MonitoringEngine {
                 } else {
                     (true, false)
                 };
+
+                // NEW: Log hook interception as event (REGARDLESS of allow/deny)
+                let event_type = match &request.operation {
+                    HookOperation::FileCreate { .. } => EventType::HookFileCreate,
+                    HookOperation::FileWrite { .. } => EventType::HookFileWrite,
+                    HookOperation::FileDelete { .. } => EventType::HookFileDelete,
+                    HookOperation::FolderCreate { .. } => EventType::HookFolderCreate,
+                    HookOperation::FolderDelete { .. } => EventType::HookFolderDelete,
+                    HookOperation::RegistrySet { .. } => EventType::HookRegistrySet,
+                    HookOperation::RegistryDelete { .. } => EventType::HookRegistryDelete,
+                    HookOperation::RegistryRead { .. } => EventType::HookRegistryRead,
+                    HookOperation::RegistryOpen { .. } => EventType::HookRegistryOpen,
+                    HookOperation::NetworkConnect { .. } => EventType::HookNetworkConnect,
+                    HookOperation::ProcessCreate { .. } => EventType::HookProcessCreate,
+                };
+
+                let event_details = if allowed {
+                    format!("✅ ALLOWED: {} - {}", operation_name, target_details)
+                } else {
+                    format!("🚫 BLOCKED: {} - {}", operation_name, target_details)
+                };
+
+                let event = Event {
+                    timestamp: Utc::now(),
+                    event_type,
+                    details: event_details,
+                };
+
+                events.lock().await.push(event);
 
                 // Send response
                 let response = HookResponse {

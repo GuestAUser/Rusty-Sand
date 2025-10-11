@@ -3,24 +3,27 @@
 
 use crate::report::{Event, EventType};
 use anyhow::Result;
-use log::{debug, warn};
+use log::{debug, info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::System::Registry::{
     RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
     KEY_NOTIFY, REG_NOTIFY_CHANGE_NAME, REG_NOTIFY_CHANGE_LAST_SET,
     REG_NOTIFY_CHANGE_ATTRIBUTES,
 };
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::PCWSTR;
 
 pub struct RealRegistryMonitor {
     events: Arc<Mutex<Vec<Event>>>,
     monitored_keys: Vec<String>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl RealRegistryMonitor {
-    pub fn new(events: Arc<Mutex<Vec<Event>>>) -> Self {
+    pub fn new(events: Arc<Mutex<Vec<Event>>>, shutdown: Arc<AtomicBool>) -> Self {
         Self {
             events,
             monitored_keys: vec![
@@ -30,6 +33,7 @@ impl RealRegistryMonitor {
                 "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce".to_string(),
                 "SYSTEM\\CurrentControlSet\\Services".to_string(),
             ],
+            shutdown,
         }
     }
 
@@ -40,21 +44,31 @@ impl RealRegistryMonitor {
         let tasks: Vec<_> = self.monitored_keys.iter().map(|key_path| {
             let key_path = key_path.clone();
             let events = self.events.clone();
+            let shutdown = self.shutdown.clone();
 
             tokio::task::spawn_blocking(move || {
-                Self::monitor_key_blocking(&key_path, events)
+                Self::monitor_key_blocking(&key_path, events, shutdown)
             })
         }).collect();
 
-        // Wait for all monitoring tasks (they run forever)
+        // Wait for all monitoring tasks or shutdown
+        loop {
+            if self.shutdown.load(Ordering::SeqCst) {
+                info!("🛑 Registry monitor shutting down...");
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        // Abort all blocking tasks on shutdown
         for task in tasks {
-            let _ = task.await;
+            task.abort();
         }
 
         Ok(())
     }
 
-    fn monitor_key_blocking(key_path: &str, events: Arc<Mutex<Vec<Event>>>) {
+    fn monitor_key_blocking(key_path: &str, events: Arc<Mutex<Vec<Event>>>, shutdown: Arc<AtomicBool>) {
         unsafe {
             // Try HKLM first
             let key_wide: Vec<u16> = key_path.encode_utf16().chain(Some(0)).collect();
@@ -86,19 +100,41 @@ impl RealRegistryMonitor {
 
             debug!("Monitoring registry key: {}", key_path);
 
+            // Create event object for interruptible waiting
+            let event_handle = match CreateEventW(None, true, false, None) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("Failed to create event for registry monitoring: {:?}", e);
+                    return;
+                }
+            };
+
             loop {
-                // Wait for changes
+                // Check shutdown signal
+                if shutdown.load(Ordering::SeqCst) {
+                    debug!("Registry monitor for {} received shutdown signal", key_path);
+                    break;
+                }
+
+                // Wait for changes with event object (non-blocking)
                 let wait_result = RegNotifyChangeKeyValue(
                     hkey,
                     true, // Watch subtree
                     REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_ATTRIBUTES,
-                    HANDLE::default(),
-                    false,
+                    event_handle,
+                    true, // Async notification
                 );
 
-                if wait_result.is_ok() {
-                    // Change detected!
-                    let details = format!("Registry change detected: HKLM\\{}", key_path);
+                if wait_result.is_err() {
+                    debug!("RegNotifyChangeKeyValue failed for {}", key_path);
+                    break;
+                }
+
+                // Wait with timeout so we can check shutdown signal
+                let wait_timeout_result = WaitForSingleObject(event_handle, 500); // 500ms timeout
+
+                if wait_timeout_result == WAIT_OBJECT_0 { // Registry change detected
+                    let details = format!("Registry change detected: {}", key_path);
                     warn!("🔧 {}", details);
 
                     let event = Event {
@@ -109,11 +145,17 @@ impl RealRegistryMonitor {
 
                     // Log event
                     let events_clone = events.clone();
-                    tokio::runtime::Handle::current().block_on(async move {
-                        events_clone.lock().await.push(event);
-                    });
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.block_on(async move {
+                            events_clone.lock().await.push(event);
+                        });
+                    }
+                } else if wait_timeout_result == WAIT_TIMEOUT {
+                    // No changes detected, loop to check shutdown signal
+                    continue;
                 } else {
-                    debug!("RegNotifyChangeKeyValue failed for {}", key_path);
+                    // Error occurred
+                    debug!("WaitForSingleObject failed for {}", key_path);
                     break;
                 }
             }

@@ -127,6 +127,7 @@ static IPC_CLIENT: Lazy<Arc<Mutex<Option<HookIpcClient>>>> =
 
 // Original function pointers (trampolines) - FIXED FFI SIGNATURES
 static mut ORIG_CREATE_FILE_W: Option<FnCreateFileW> = None;
+static mut ORIG_CREATE_DIRECTORY_W: Option<FnCreateDirectoryW> = None;
 static mut ORIG_REMOVE_DIRECTORY_W: Option<FnRemoveDirectoryW> = None;
 static mut ORIG_CONNECT: Option<FnConnect> = None;
 static mut ORIG_REG_SET_VALUE_EX_W: Option<FnRegSetValueExW> = None;
@@ -166,6 +167,11 @@ type FnCreateFileW = unsafe extern "system" fn(
     u32,
     HANDLE,
 ) -> HANDLE; // FIXED: Returns raw HANDLE, not Result!
+
+type FnCreateDirectoryW = unsafe extern "system" fn(
+    PCWSTR,
+    *const std::ffi::c_void,
+) -> windows::Win32::Foundation::BOOL;
 
 type FnRemoveDirectoryW = unsafe extern "system" fn(PCWSTR) -> windows::Win32::Foundation::BOOL;
 
@@ -303,6 +309,45 @@ unsafe extern "system" fn hooked_create_file_w(
         )
     } else {
         INVALID_HANDLE_VALUE
+    }
+}
+
+/// Hooked CreateDirectoryW - intercepts folder creation BEFORE execution
+unsafe extern "system" fn hooked_create_directory_w(
+    lppathname: PCWSTR,
+    lpsecurityattributes: *const std::ffi::c_void,
+) -> windows::Win32::Foundation::BOOL {
+    // Extract folder path
+    let folder_path = if !lppathname.is_null() {
+        let mut len = 0;
+        while *lppathname.0.offset(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(lppathname.0, len as usize);
+        String::from_utf16_lossy(slice)
+    } else {
+        // Call original if null
+        if let Some(orig) = ORIG_CREATE_DIRECTORY_W {
+            return orig(lppathname, lpsecurityattributes);
+        }
+        return windows::Win32::Foundation::BOOL(0);
+    };
+
+    let operation = HookOperation::FolderCreate {
+        path: folder_path,
+    };
+
+    // REQUEST APPROVAL - THIS IS WHERE WE BLOCK!
+    if !request_approval(operation) {
+        // DENIED - return FALSE (failure)
+        return windows::Win32::Foundation::BOOL(0);
+    }
+
+    // ALLOWED - call original function
+    if let Some(orig) = ORIG_CREATE_DIRECTORY_W {
+        orig(lppathname, lpsecurityattributes)
+    } else {
+        windows::Win32::Foundation::BOOL(0)
     }
 }
 
@@ -560,6 +605,13 @@ unsafe fn install_hooks() -> Result<(), String> {
     )
     .ok_or("CreateFileW not found")?;
 
+    // Get CreateDirectoryW address
+    let createdirectoryw_addr = windows::Win32::System::LibraryLoader::GetProcAddress(
+        kernel32,
+        windows::core::PCSTR(c"CreateDirectoryW".as_ptr() as *const u8),
+    )
+    .ok_or("CreateDirectoryW not found")?;
+
     // Get RemoveDirectoryW address
     let removedirectoryw_addr = windows::Win32::System::LibraryLoader::GetProcAddress(
         kernel32,
@@ -613,6 +665,18 @@ unsafe fn install_hooks() -> Result<(), String> {
 
     MinHook::enable_hook(createfilew_addr as *mut _)
         .map_err(|e| format!("Failed to enable CreateFileW hook: {:?}", e))?;
+
+    // Hook CreateDirectoryW
+    let orig_createdirectoryw = MinHook::create_hook(
+        createdirectoryw_addr as *mut _,
+        hooked_create_directory_w as *mut _,
+    )
+    .map_err(|e| format!("Failed to hook CreateDirectoryW: {:?}", e))?;
+
+    ORIG_CREATE_DIRECTORY_W = Some(std::mem::transmute::<*mut std::ffi::c_void, FnCreateDirectoryW>(orig_createdirectoryw));
+
+    MinHook::enable_hook(createdirectoryw_addr as *mut _)
+        .map_err(|e| format!("Failed to enable CreateDirectoryW hook: {:?}", e))?;
 
     // Hook RemoveDirectoryW
     let orig_removedirectoryw = MinHook::create_hook(

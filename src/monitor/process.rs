@@ -18,6 +18,9 @@ pub struct ProcessMonitor {
     target_pid: u32,
     events: Arc<Mutex<Vec<Event>>>,
     tracked_children: Arc<Mutex<HashSet<u32>>>,
+    tracked_terminated: Arc<Mutex<HashSet<u32>>>,
+    last_memory_alert: Arc<Mutex<std::time::Instant>>,
+    last_cpu_alert: Arc<Mutex<std::time::Instant>>,
 }
 
 impl ProcessMonitor {
@@ -26,6 +29,9 @@ impl ProcessMonitor {
             target_pid,
             events,
             tracked_children: Arc::new(Mutex::new(HashSet::new())),
+            tracked_terminated: Arc::new(Mutex::new(HashSet::new())),
+            last_memory_alert: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_cpu_alert: Arc::new(Mutex::new(std::time::Instant::now())),
         })
     }
 
@@ -35,8 +41,8 @@ impl ProcessMonitor {
         let mut sys = System::new_all();
 
         loop {
-            // Poll much faster - 50ms instead of 500ms
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            // Poll very aggressively - 20ms to catch short-lived processes
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
             sys.refresh_processes_specifics(
                 ProcessRefreshKind::new()
@@ -56,7 +62,10 @@ impl ProcessMonitor {
             #[cfg(windows)]
             self.check_child_processes_windows().await;
 
-            // Monitor resource usage
+            // Check for terminated child processes
+            self.check_terminated_processes(&sys).await;
+
+            // Monitor resource usage and emit events for thresholds
             if let Some(process) = sys.process(sysinfo::Pid::from_u32(self.target_pid)) {
                 let memory_mb = process.memory() / 1024 / 1024;
                 let cpu_usage = process.cpu_usage();
@@ -66,6 +75,40 @@ impl ProcessMonitor {
                         "Process {} - Memory: {} MB, CPU: {:.2}%",
                         self.target_pid, memory_mb, cpu_usage
                     );
+
+                    // Alert on high memory usage (> 100 MB, max once per 30 seconds)
+                    if memory_mb > 100 {
+                        let mut last_alert = self.last_memory_alert.lock().await;
+                        if last_alert.elapsed().as_secs() >= 30 {
+                            *last_alert = std::time::Instant::now();
+                            drop(last_alert);
+
+                            let event = Event {
+                                timestamp: chrono::Utc::now(),
+                                event_type: EventType::HighMemoryUsage,
+                                details: format!("Process using {} MB memory", memory_mb),
+                            };
+                            self.events.lock().await.push(event);
+                            info!("🔴 High memory usage detected: {} MB", memory_mb);
+                        }
+                    }
+
+                    // Alert on high CPU usage (> 50%, max once per 30 seconds)
+                    if cpu_usage > 50.0 {
+                        let mut last_alert = self.last_cpu_alert.lock().await;
+                        if last_alert.elapsed().as_secs() >= 30 {
+                            *last_alert = std::time::Instant::now();
+                            drop(last_alert);
+
+                            let event = Event {
+                                timestamp: chrono::Utc::now(),
+                                event_type: EventType::HighCpuUsage,
+                                details: format!("Process using {:.2}% CPU", cpu_usage),
+                            };
+                            self.events.lock().await.push(event);
+                            info!("🔴 High CPU usage detected: {:.2}%", cpu_usage);
+                        }
+                    }
                 }
             }
         }
@@ -186,5 +229,34 @@ impl ProcessMonitor {
     #[cfg(not(windows))]
     async fn check_child_processes_windows(&self) {
         // Not available on non-Windows platforms
+    }
+
+    /// Check for terminated child processes and emit ProcessTerminated events
+    async fn check_terminated_processes(&self, sys: &System) {
+        let tracked = self.tracked_children.lock().await;
+        let tracked_pids: Vec<u32> = tracked.iter().copied().collect();
+        drop(tracked);
+
+        for pid in tracked_pids {
+            // If process no longer exists in system
+            if sys.process(sysinfo::Pid::from_u32(pid)).is_none() {
+                let mut terminated = self.tracked_terminated.lock().await;
+
+                // Only log once per PID
+                if !terminated.contains(&pid) {
+                    terminated.insert(pid);
+                    drop(terminated);
+
+                    let event = Event {
+                        timestamp: chrono::Utc::now(),
+                        event_type: EventType::ProcessTerminated,
+                        details: format!("Child process PID {} terminated", pid),
+                    };
+
+                    info!("💀 Process terminated: PID {}", pid);
+                    self.events.lock().await.push(event);
+                }
+            }
+        }
     }
 }
