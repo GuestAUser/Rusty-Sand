@@ -529,6 +529,8 @@ MIT License - See LICENSE file for details.
 - Windows API documentation and community
 - Rust security community
 - Malware analysis research community
+- Practical Malware Analysis: The Hands-On Guide to Dissecting Malicious Software 1st Edition
+by Michael Sikorski (Author), Andrew Honig (Author)
 
 ---
 
