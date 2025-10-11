@@ -6,7 +6,7 @@ resolver = "2"
 name = "rusty_sand"
 version = "1.0.0"
 edition = "2021"
-authors = ["Security Research Team"]
+authors = ["GuestAUser"]
 description = "Executable sandbox for security analysis - monitor processes in isolated environments"
 license = "MIT"
 
