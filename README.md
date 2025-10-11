@@ -12,6 +12,8 @@ Rusty Sand is a executable sandbox for Windows security research that i've made 
 
 ---
 
+[![Watch the video](https://img.youtube.com/vi/Vp79HcTJaAE/maxresdefault.jpg)](https://www.youtube.com/watch?v=Vp79HcTJaAE)
+
 ## 🌟 Key Features
 
 ### 🛡️ Real-Time API Interception (HIPS)
