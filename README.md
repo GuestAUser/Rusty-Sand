@@ -23,13 +23,14 @@ Rusty Sand is a executable sandbox for Windows security research that i've made 
 - **MinHook Integration**: Inline API hooking for Windows functions
 - **Pre-Execution Blocking**: Operations intercepted BEFORE they execute
 - **Named Pipe IPC**: Secure communication between main process and hook DLL
-- **Hooked APIs**:
-  - `CreateFileW` - File/folder creation and modification
+- **Hooked APIs** (8 critical Windows functions):
+  - `CreateFileW` - File creation and modification (with folder detection via flags)
+  - `CreateDirectoryW` - Dedicated folder creation interception ✨ **NEW**
   - `RemoveDirectoryW` - Folder deletion
-  - `connect` - Network connections
+  - `connect` - Network connections (TCP/UDP)
   - `RegSetValueExW` - Registry value writes
   - `RegDeleteKeyW` - Registry key deletion
-  - `RegQueryValueExW` - Registry reads
+  - `RegQueryValueExW` - Registry value reads
   - `RegOpenKeyExW` - Registry key opens
 
 ### 🔍 Comprehensive Monitoring
@@ -286,7 +287,7 @@ When an operation is intercepted:
 
 🔐 SECURITY CONFIGURATION
   Internet:       DISABLED ✓
-  API Hooks:      ENABLED (7 hooks active)
+  API Hooks:      ENABLED (8 hooks active)
   Interactive:    ENABLED (HIPS mode)
   Memory Limit:   1024 MB
 
@@ -415,11 +416,15 @@ See [examples/basic_usage.rs](examples/basic_usage.rs) and [examples/advanced_mo
 |-----------|------|---------|
 | **Hook DLL** | [rusty_sand_hooks/src/lib.rs](rusty_sand_hooks/src/lib.rs) | MinHook API interception |
 
-**Hooked Functions**:
-- `CreateFileW` - Detects file/folder creation, modification, deletion
-- `RemoveDirectoryW` - Intercepts folder deletion
-- `connect` - Blocks network connections
-- `RegSetValueExW`, `RegDeleteKeyW`, `RegQueryValueExW`, `RegOpenKeyExW` - Registry operations
+**Hooked Functions** (8 total):
+- `CreateFileW` - File creation, modification, deletion (also detects folders via flags)
+- `CreateDirectoryW` - Dedicated folder creation hook ✨ **NEW**
+- `RemoveDirectoryW` - Folder deletion
+- `connect` - Network connections (TCP/UDP)
+- `RegSetValueExW` - Registry value writes
+- `RegDeleteKeyW` - Registry key deletion
+- `RegQueryValueExW` - Registry value reads
+- `RegOpenKeyExW` - Registry key opens
 
 ---
 
