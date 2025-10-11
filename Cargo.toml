@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "rusty_sand"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["GuestAUser"]
 description = "Executable sandbox for security analysis - monitor processes in isolated environments"

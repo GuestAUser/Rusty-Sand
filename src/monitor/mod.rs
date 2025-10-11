@@ -501,35 +501,30 @@ impl MonitoringEngine {
                     }
                 };
 
-                // Convert hook operation to clear description
-                let (operation_name, target_details) = match &request.operation {
-                    HookOperation::FileCreate { path } => ("CREATE FILE", path.clone()),
-                    HookOperation::FileWrite { path } => ("WRITE FILE", path.clone()),
-                    HookOperation::FileDelete { path } => ("DELETE FILE", path.clone()),
-                    HookOperation::FolderCreate { path } => ("CREATE FOLDER", path.clone()),
-                    HookOperation::FolderDelete { path } => ("DELETE FOLDER", path.clone()),
-                    HookOperation::RegistrySet { key, value } => {
-                        ("SET REGISTRY", format!("{} = {}", key, value))
-                    }
-                    HookOperation::RegistryDelete { key } => ("DELETE REGISTRY", key.clone()),
-                    HookOperation::RegistryRead { key, value } => {
-                        ("READ REGISTRY", format!("{} -> {}", key, value))
-                    }
-                    HookOperation::RegistryOpen { key } => ("OPEN REGISTRY", key.clone()),
-                    HookOperation::NetworkConnect { remote_addr, port } => {
-                        ("NETWORK CONNECT", format!("{}:{}", remote_addr, port))
-                    }
-                    HookOperation::ProcessCreate { executable, args } => {
-                        ("START PROCESS", format!("{} {}", executable, args))
-                    }
-                };
+                // Use the enhanced short_description() method
+                let operation_desc = request.operation.short_description();
+
+                // Extract operation name for auto-allow/deny tracking
+                let operation_name = std::mem::discriminant(&request.operation);
+                let operation_name_str = format!("{:?}", operation_name);
+
+                // ANALYZE OPERATION AND CALCULATE RISK SCORE
+                use crate::analysis::analyze_operation;
+                let risk_analysis = analyze_operation(&request.operation);
+
+                // PHASE 1.5: Auto-allow read-only operations (CRITICAL for reducing prompt fatigue)
+                let is_read_only = request.operation.is_read_only();
 
                 // Check if this operation type is auto-allowed or auto-denied
                 let (allowed, should_terminate) = if config.interactive_mode {
-                    if auto_allowed.get(operation_name).copied().unwrap_or(false) {
+                    // Auto-allow read-only operations (registry reads, file reads, etc.)
+                    if is_read_only {
+                        debug!("🔓 Auto-allowed READ-ONLY operation: {}", operation_desc);
+                        (true, false)
+                    } else if auto_allowed.get(&operation_name_str).copied().unwrap_or(false) {
                         // Auto-allowed - skip prompt
                         (true, false)
-                    } else if auto_denied.get(operation_name).copied().unwrap_or(false) {
+                    } else if auto_denied.get(&operation_name_str).copied().unwrap_or(false) {
                         // Auto-denied - skip prompt
                         (false, false)
                     } else {
@@ -542,8 +537,22 @@ impl MonitoringEngine {
                         println!("{} #{}", "⚠️  INTERCEPTED OPERATION".bright_red().bold(), prompt_num);
                         println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_yellow());
                         println!();
-                        println!("  {} {}", "ACTION:".bright_white().bold(), operation_name.bright_yellow().bold());
-                        println!("  {} {}", "TARGET:".bright_white().bold(), target_details.bright_cyan());
+                        println!("  {} {}", "OPERATION:".bright_white().bold(), operation_desc.bright_cyan());
+                        println!();
+
+                        // DISPLAY RISK ANALYSIS
+                        let risk_color = match risk_analysis.category {
+                            crate::analysis::ThreatCategory::Low => colored::Color::Green,
+                            crate::analysis::ThreatCategory::Medium => colored::Color::Yellow,
+                            crate::analysis::ThreatCategory::High => colored::Color::BrightRed,
+                            crate::analysis::ThreatCategory::Critical => colored::Color::Red,
+                        };
+                        println!("  {} {} {}/100 [{}]",
+                            "RISK SCORE:".bright_white().bold(),
+                            risk_analysis.category.color_code(),
+                            format!("{}", risk_analysis.score).color(risk_color).bold(),
+                            risk_analysis.category.as_str().color(risk_color).bold()
+                        );
                         println!();
                         println!("  🛑 {} ", "BLOCKED - Waiting for your decision...".bright_red());
                         println!();
@@ -559,13 +568,13 @@ impl MonitoringEngine {
                                 (true, false)
                             }
                             "A" => {
-                                println!("  {} ALLOWED - All '{}' operations auto-approved", "✅".bright_green(), operation_name.bright_cyan());
-                                auto_allowed.insert(operation_name.to_string(), true);
+                                println!("  {} ALLOWED - All similar operations auto-approved", "✅".bright_green());
+                                auto_allowed.insert(operation_name_str.clone(), true);
                                 (true, false)
                             }
                             "D" => {
-                                println!("  {} BLOCKED - All '{}' operations auto-denied", "🚫".bright_red(), operation_name.bright_cyan());
-                                auto_denied.insert(operation_name.to_string(), true);
+                                println!("  {} BLOCKED - All similar operations auto-denied", "🚫".bright_red());
+                                auto_denied.insert(operation_name_str.clone(), true);
                                 (false, false)
                             }
                             "T" => {
@@ -601,6 +610,10 @@ impl MonitoringEngine {
                     HookOperation::FileCreate { .. } => EventType::HookFileCreate,
                     HookOperation::FileWrite { .. } => EventType::HookFileWrite,
                     HookOperation::FileDelete { .. } => EventType::HookFileDelete,
+                    HookOperation::FileRead { .. } => EventType::HookFileRead,
+                    HookOperation::FileMove { .. } => EventType::HookFileMove,
+                    HookOperation::FileCopy { .. } => EventType::HookFileCopy,
+                    HookOperation::FileAttributeChange { .. } => EventType::HookFileAttributeChange,
                     HookOperation::FolderCreate { .. } => EventType::HookFolderCreate,
                     HookOperation::FolderDelete { .. } => EventType::HookFolderDelete,
                     HookOperation::RegistrySet { .. } => EventType::HookRegistrySet,
@@ -608,13 +621,21 @@ impl MonitoringEngine {
                     HookOperation::RegistryRead { .. } => EventType::HookRegistryRead,
                     HookOperation::RegistryOpen { .. } => EventType::HookRegistryOpen,
                     HookOperation::NetworkConnect { .. } => EventType::HookNetworkConnect,
+                    HookOperation::NetworkSend { .. } => EventType::HookNetworkSend,
+                    HookOperation::NetworkReceive { .. } => EventType::HookNetworkReceive,
                     HookOperation::ProcessCreate { .. } => EventType::HookProcessCreate,
+                    HookOperation::ThreadCreate { .. } => EventType::HookThreadCreate,
+                    HookOperation::ThreadCreateRemote { .. } => EventType::HookThreadCreateRemote,
+                    HookOperation::DllLoad { .. } => EventType::HookDllLoad,
+                    HookOperation::MemoryAllocate { .. } => EventType::HookMemoryAllocate,
+                    HookOperation::MemoryProtect { .. } => EventType::HookMemoryProtect,
+                    HookOperation::MemoryWrite { .. } => EventType::HookMemoryWrite,
                 };
 
                 let event_details = if allowed {
-                    format!("✅ ALLOWED: {} - {}", operation_name, target_details)
+                    format!("✅ ALLOWED: {}", operation_desc)
                 } else {
-                    format!("🚫 BLOCKED: {} - {}", operation_name, target_details)
+                    format!("🚫 BLOCKED: {}", operation_desc)
                 };
 
                 let event = Event {

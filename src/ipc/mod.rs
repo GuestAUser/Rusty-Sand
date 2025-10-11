@@ -32,20 +32,209 @@ pub struct HookRequest {
     pub tid: u32,
 }
 
-/// Types of operations that can be hooked
+/// Network protocol type
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Tcp6,
+    Udp6,
+}
+
+/// Types of operations that can be hooked (ENHANCED with rich metadata)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
 pub enum HookOperation {
-    FileCreate { path: String },
-    FileWrite { path: String },
-    FileDelete { path: String },
-    FolderCreate { path: String },
-    FolderDelete { path: String },
-    RegistrySet { key: String, value: String },
-    RegistryDelete { key: String },
-    RegistryRead { key: String, value: String },
-    RegistryOpen { key: String },
-    NetworkConnect { remote_addr: String, port: u16 },
-    ProcessCreate { executable: String, args: String },
+    // File operations (enhanced)
+    FileCreate {
+        path: String,
+        access_rights: u32,
+        share_mode: u32,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+    },
+    FileWrite {
+        path: String,
+        handle: u64,
+    },
+    FileDelete {
+        path: String,
+    },
+    FileRead {
+        path: String,
+    },
+    FileMove {
+        source: String,
+        destination: String,
+    },
+    FileCopy {
+        source: String,
+        destination: String,
+    },
+    FileAttributeChange {
+        path: String,
+        new_attributes: u32,
+    },
+
+    // Folder operations
+    FolderCreate {
+        path: String,
+    },
+    FolderDelete {
+        path: String,
+    },
+
+    // Registry operations (enhanced)
+    RegistrySet {
+        key: String,
+        value: String,
+        data_type: u32,
+        data_size: u32,
+    },
+    RegistryDelete {
+        key: String,
+    },
+    RegistryRead {
+        key: String,
+        value: String,
+    },
+    RegistryOpen {
+        key: String,
+        access_rights: u32,
+    },
+
+    // Network operations (enhanced)
+    NetworkConnect {
+        remote_addr: String,
+        port: u16,
+        protocol: NetworkProtocol,
+    },
+    NetworkSend {
+        remote_addr: String,
+        port: u16,
+        bytes_to_send: u32,
+    },
+    NetworkReceive {
+        remote_addr: String,
+        port: u16,
+        bytes_to_receive: u32,
+    },
+
+    // Process operations (enhanced)
+    ProcessCreate {
+        executable: String,
+        args: String,
+        creation_flags: u32,
+    },
+
+    // Thread operations (NEW)
+    ThreadCreate {
+        start_address: u64,
+        parameter: u64,
+    },
+    ThreadCreateRemote {
+        target_process_id: u32,
+        start_address: u64,
+    },
+
+    // DLL/Memory operations (NEW)
+    DllLoad {
+        dll_path: String,
+        load_flags: u32,
+    },
+    MemoryAllocate {
+        base_address: u64,
+        size: usize,
+        protection: u32,
+        allocation_type: u32,
+    },
+    MemoryProtect {
+        base_address: u64,
+        size: usize,
+        old_protection: u32,
+        new_protection: u32,
+    },
+    MemoryWrite {
+        target_process_id: u32,
+        base_address: u64,
+        bytes_to_write: u32,
+    },
+}
+
+impl HookOperation {
+    /// Determine if this is a read-only operation (for filtering)
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            HookOperation::FileRead { .. }
+                | HookOperation::RegistryRead { .. }
+                | HookOperation::RegistryOpen { .. }
+                | HookOperation::NetworkReceive { .. }
+        )
+    }
+
+    /// Get a short description for display
+    pub fn short_description(&self) -> String {
+        match self {
+            HookOperation::FileCreate { path, .. } => format!("Create file: {}", path),
+            HookOperation::FileWrite { path, .. } => format!("Write to file: {}", path),
+            HookOperation::FileDelete { path } => format!("Delete file: {}", path),
+            HookOperation::FileRead { path } => format!("Read file: {}", path),
+            HookOperation::FileMove { source, destination } => {
+                format!("Move file: {} → {}", source, destination)
+            }
+            HookOperation::FileCopy { source, destination } => {
+                format!("Copy file: {} → {}", source, destination)
+            }
+            HookOperation::FileAttributeChange { path, .. } => {
+                format!("Change file attributes: {}", path)
+            }
+            HookOperation::FolderCreate { path } => format!("Create folder: {}", path),
+            HookOperation::FolderDelete { path } => format!("Delete folder: {}", path),
+            HookOperation::RegistrySet { key, value, .. } => {
+                format!("Set registry: {}::{}", key, value)
+            }
+            HookOperation::RegistryDelete { key } => format!("Delete registry key: {}", key),
+            HookOperation::RegistryRead { key, value } => {
+                format!("Read registry: {}::{}", key, value)
+            }
+            HookOperation::RegistryOpen { key, .. } => format!("Open registry key: {}", key),
+            HookOperation::NetworkConnect { remote_addr, port, .. } => {
+                format!("Connect to: {}:{}", remote_addr, port)
+            }
+            HookOperation::NetworkSend { remote_addr, port, bytes_to_send } => {
+                format!("Send {} bytes to {}:{}", bytes_to_send, remote_addr, port)
+            }
+            HookOperation::NetworkReceive { remote_addr, port, bytes_to_receive } => {
+                format!("Receive {} bytes from {}:{}", bytes_to_receive, remote_addr, port)
+            }
+            HookOperation::ProcessCreate { executable, args, .. } => {
+                format!("Execute: {} {}", executable, args)
+            }
+            HookOperation::ThreadCreate { start_address, .. } => {
+                format!("Create thread at 0x{:X}", start_address)
+            }
+            HookOperation::ThreadCreateRemote { target_process_id, start_address } => {
+                format!("Create remote thread in PID {} at 0x{:X}", target_process_id, start_address)
+            }
+            HookOperation::DllLoad { dll_path, .. } => format!("Load DLL: {}", dll_path),
+            HookOperation::MemoryAllocate { base_address, size, .. } => {
+                format!("Allocate {} bytes at 0x{:X}", size, base_address)
+            }
+            HookOperation::MemoryProtect { base_address, size, old_protection, new_protection } => {
+                format!(
+                    "Change memory protection at 0x{:X} (size: {}, 0x{:X} → 0x{:X})",
+                    base_address, size, old_protection, new_protection
+                )
+            }
+            HookOperation::MemoryWrite { target_process_id, base_address, bytes_to_write } => {
+                format!(
+                    "Write {} bytes to PID {} at 0x{:X}",
+                    bytes_to_write, target_process_id, base_address
+                )
+            }
+        }
+    }
 }
 
 /// Response from main process to hook DLL

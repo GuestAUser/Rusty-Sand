@@ -1,6 +1,6 @@
 [package]
 name = "rusty_sand_hooks"
-version = "0.1.0"
+version = "0.2.5"
 edition = "2021"
 authors = ["Security Research Team"]
 description = "API hooking DLL for Rusty Sand sandbox"
@@ -29,6 +29,7 @@ windows = { version = "0.52", features = [
     "Win32_System_IO",
     "Win32_System_Registry",
     "Win32_Networking_WinSock",
+    "Win32_System_Memory",
 ] }
 
 # Logging

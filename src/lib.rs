@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod behavior;
 pub mod config;
 pub mod control;
