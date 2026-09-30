@@ -14,7 +14,7 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, QueryFullProcessImageNameW, ResumeThread, TerminateProcess,
-    WaitForSingleObject, CREATE_NEW_CONSOLE, CREATE_SUSPENDED, PROCESS_INFORMATION,
+    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, PROCESS_INFORMATION,
     PROCESS_NAME_WIN32, STARTUPINFOW,
 };
 
@@ -203,7 +203,7 @@ pub fn create_sandboxed_process(
             None,
             None,
             false,
-            CREATE_SUSPENDED | CREATE_NEW_CONSOLE,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW,
             None,
             directory
                 .as_ref()

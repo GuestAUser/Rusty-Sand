@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Launch this checkout's Windows backend from WSL using a cancellable pipe."""
+
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import threading
+
+ROOT = Path(__file__).resolve().parent
+PATH_LONG = {"--workdir", "--output"}
+VALUE_LONG = {"--timeout", "--format", "--memory", "--color"}
+PATH_SHORT = {"w", "o"}
+VALUE_SHORT = {"t", "f", "m"}
+HELP = """Usage: ./rusty-sand [--launcher-debug] [OPTIONS] EXECUTABLE [-- ARGS...]
+
+Runs target/x86_64-pc-windows-gnu/release/rusty_sand.exe in this checkout.
+Build explicitly first; nothing is copied or built automatically.
+--launcher-debug selects debug explicitly, never as an automatic fallback.
+Linux executable, --workdir/-w and --output/-o paths use wslpath conversion.
+Absolute Windows paths and target arguments after -- are passed unchanged.
+
+Backend options:
+  -w, --workdir PATH       Target working directory
+  -o, --output PATH        Reports (default: checkout/sandbox_output)
+  -t, --timeout SECONDS    Timeout (default: 300)
+  -m, --memory MB          Memory limit (default: 1024)
+  -f, --format FORMAT      console, json, or both
+  -i, --internet          Request internet access (also enables DNS)
+  -d, --dns               Request DNS access
+  -v, --verbose           Debug logging
+      --color MODE        auto, always, or never
+      --plain --reduced-motion
+      --log-network --no-registry --no-interactive --no-behavior-detection
+
+Interactive EOF, SIGINT and SIGTERM cancel and wait for Windows cleanup.
+With --no-interactive, ordinary EOF is ignored; signals still cancel.
+Monitoring is not complete isolation. Use a disposable VM for untrusted programs.
+"""
+
+def windows_path(value, cwd):
+    """Only absolute DOS/UNC paths bypass WSL conversion."""
+    if re.match(r"^[A-Za-z]:", value):
+        if len(value) < 3 or value[2] not in "\\/":
+            raise ValueError(f"drive-relative Windows path is unsupported: {value!r}")
+        return value
+    if value.startswith("\\\\") or value.startswith("//"):
+        return value
+
+    path = Path(value)
+    if not path.is_absolute():
+        path = cwd / path
+    result = subprocess.run(
+        ["wslpath", "-w", str(path)], check=True, capture_output=True, text=True
+    )
+    return result.stdout.rstrip("\r\n")
+
+def translate_arguments(arguments, cwd):
+    """Parse only path boundaries; leave backend validation to clap."""
+    translated = []
+    executable_seen = False
+    output_seen = False
+    profile = "release"
+    index = 0
+
+    while index < len(arguments):
+        token = arguments[index]
+        index += 1
+        if token == "--":
+            translated.extend(arguments[index - 1 :])
+            break
+        if token == "--launcher-debug":
+            profile = "debug"
+            continue
+        if token.startswith("--"):
+            name, separator, value = token.partition("=")
+            if name in PATH_LONG | VALUE_LONG:
+                if not separator:
+                    if index == len(arguments):
+                        raise ValueError(f"{name} requires a value")
+                    value = arguments[index]
+                    index += 1
+                if name in PATH_LONG:
+                    value = windows_path(value, cwd)
+                output_seen |= name == "--output"
+                translated.extend([name, value])
+            else:
+                translated.append(token)
+            continue
+        if token.startswith("-") and token != "-":
+            # clap permits boolean short-option clusters before a value option.
+            for position, name in enumerate(token[1:], 1):
+                if name not in PATH_SHORT | VALUE_SHORT:
+                    continue
+                value = token[position + 1 :]
+                if value.startswith("="):
+                    value = value[1:]
+                if not value:
+                    if index == len(arguments):
+                        raise ValueError(f"-{name} requires a value")
+                    value = arguments[index]
+                    index += 1
+                if name in PATH_SHORT:
+                    value = windows_path(value, cwd)
+                output_seen |= name == "o"
+                translated.extend([token[: position + 1], value])
+                break
+            else:
+                translated.append(token)
+            continue
+        if not executable_seen:
+            token = windows_path(token, cwd)
+            executable_seen = True
+        translated.append(token)
+
+    if not output_seen:
+        translated[0:0] = ["--output", windows_path(str(ROOT / "sandbox_output"), cwd)]
+    return profile, translated
+
+def backend_environment(source):
+    environment = source.copy()
+    environment["RUSTY_SAND_STDERR_TTY"] = "1" if os.isatty(2) else "0"
+    try:
+        columns = os.get_terminal_size(2).columns
+    except OSError:
+        columns = 80
+    environment["RUSTY_SAND_COLUMNS"] = str(columns)
+
+    # Display hints are never authorization. Preserve unrelated WSLENV entries
+    # while removing any path-translation flags on these non-path values.
+    names = ["RUSTY_SAND_STDERR_TTY", "RUSTY_SAND_COLUMNS", "TERM", "NO_COLOR"]
+    entries = [
+        entry for entry in environment.get("WSLENV", "").split(":")
+        if entry and entry.split("/", 1)[0] not in names
+    ]
+    entries.extend(name for name in names if name in environment)
+    environment["WSLENV"] = ":".join(entries)
+    return environment
+
+def forward_input(command, environment, cwd, *, close_on_eof=True):
+    """Bounded nonblocking forwarding with a self-pipe for exit and signals.
+
+    Only the child waiter is threaded. A separate process group prevents Ctrl-C
+    from killing the interop host before Windows has cleaned up its target.
+    Terminal canonical mode and echo remain owned by the caller's terminal.
+    """
+    wake_read, wake_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+    stopped = False
+    previous = {}
+    child = None
+    waiter = None
+
+    def wake():
+        try:
+            os.write(wake_write, b"x")
+        except BlockingIOError:
+            pass  # A full wake pipe is already readable.
+
+    def cancel(_number, _frame):
+        nonlocal stopped
+        stopped = True
+        wake()
+
+    try:
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous[number] = signal.signal(number, cancel)
+        child = subprocess.Popen(
+            command, stdin=subprocess.PIPE, bufsize=0, cwd=cwd,
+            env=environment, start_new_session=True,
+        )
+        os.set_blocking(child.stdin.fileno(), False)
+
+        def wait_child():
+            child.wait()
+            wake()
+
+        waiter = threading.Thread(target=wait_child, name="rusty-sand-exit")
+        waiter.start()
+        pending = bytearray()
+        eof = False
+        input_fd = sys.stdin.fileno()
+
+        # Unlike epoll, select also accepts regular files and /dev/null.
+        with selectors.SelectSelector() as selector:
+            selector.register(wake_read, selectors.EVENT_READ, "wake")
+            while child.poll() is None:
+                if stopped:
+                    pending.clear()
+                    eof = True
+                if eof and not pending and (stopped or close_on_eof) and not child.stdin.closed:
+                    child.stdin.close()
+
+                for descriptor, enabled, event, tag in (
+                    (input_fd, not eof and len(pending) < 65536, selectors.EVENT_READ, "input"),
+                    (child.stdin, bool(pending) and not child.stdin.closed, selectors.EVENT_WRITE, "output"),
+                ):
+                    existing = next((key for key in selector.get_map().values() if key.data == tag), None)
+                    if existing is not None and not enabled:
+                        selector.unregister(existing.fd)
+                    elif existing is None and enabled:
+                        selector.register(descriptor, event, tag)
+
+                for key, _events in selector.select():
+                    if key.data == "wake":
+                        os.read(wake_read, 4096)
+                    elif key.data == "input" and not stopped:
+                        data = os.read(input_fd, 65536 - len(pending))
+                        if data:
+                            pending.extend(data)
+                        else:
+                            eof = True
+                    elif key.data == "output" and not stopped:
+                        try:
+                            count = os.write(child.stdin.fileno(), pending)
+                            del pending[:count]
+                        except BlockingIOError:
+                            pass  # Readiness can race a short nonblocking write.
+                        except BrokenPipeError:
+                            pending.clear()
+                            eof = True
+        return child.wait()
+    finally:
+        # Local failures also close input and wait; no timeout kill can strand
+        # a Windows target by destroying the host responsible for its cleanup.
+        if child is not None:
+            if not child.stdin.closed:
+                child.stdin.close()
+            child.wait()
+        if waiter is not None:
+            waiter.join()
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        os.close(wake_read)
+        os.close(wake_write)
+
+def main(arguments=None):
+    arguments = list(sys.argv[1:] if arguments is None else arguments)
+    options = arguments[: arguments.index("--")] if "--" in arguments else arguments
+    if not arguments or any(token in ("--help", "-h", "--launcher-help") for token in options):
+        print(HELP)
+        return 0
+    if not (os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP")):
+        print("rusty-sand: this launcher requires WSL; on Windows run rusty_sand.exe directly", file=sys.stderr)
+        return 2
+    try:
+        profile, forwarded = translate_arguments(arguments, Path.cwd())
+        backend = ROOT / "target" / "x86_64-pc-windows-gnu" / profile / "rusty_sand.exe"
+        if not backend.is_file():
+            raise ValueError(
+                f"missing {backend}; build explicitly with cargo build --locked --workspace "
+                f"--target x86_64-pc-windows-gnu{' --release' if profile == 'release' else ''}"
+            )
+        return forward_input(
+            [str(backend), *forwarded],
+            backend_environment(os.environ),
+            ROOT,
+            close_on_eof="--no-interactive" not in options,
+        )
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"rusty-sand: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

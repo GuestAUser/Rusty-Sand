@@ -99,3 +99,71 @@ fn summary_handles_empty_and_truncated_histories() {
     report(&[]).print_summary();
     report(&vec![EventType::HookNetworkConnect; 101]).print_summary();
 }
+
+fn summary_policy(color: crate::ui::ColorMode) -> crate::ui::OutputPolicy {
+    crate::ui::OutputPolicy {
+        color,
+        plain: false,
+        reduced_motion: true,
+        tty: true,
+        columns: 100,
+    }
+}
+
+#[test]
+fn summary_respects_color_policy_and_escapes_untrusted_terminal_controls() {
+    use crate::ui::ColorMode;
+
+    let mut report = report(&[EventType::HookFileWrite]);
+    report.executable = "target\x1b[2J.exe".into();
+    report.events[0].details = "payload\x1b]0;spoof\x07".into();
+    let json_before = report.to_json().unwrap();
+    for color in [ColorMode::Never, ColorMode::Always] {
+        let mut output = Vec::new();
+        report
+            .write_summary(&mut output, &summary_policy(color))
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.contains('\x1b'), color == ColorMode::Always);
+        assert!(!output.contains("\x1b[2J"));
+        assert!(!output.contains("\x1b]0;"));
+        assert!(!output.contains('\x07'));
+        assert_eq!(report.to_json().unwrap(), json_before);
+    }
+}
+
+#[test]
+fn summary_returns_destination_failures() {
+    struct FailedWriter;
+    impl std::io::Write for FailedWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let error = report(&[])
+        .write_summary(
+            &mut FailedWriter,
+            &summary_policy(crate::ui::ColorMode::Never),
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn summary_retains_only_last_one_hundred_event_payloads() {
+    let mut report = report(&vec![EventType::HookFileWrite; 101]);
+    report.events[0].details = "discarded-sentinel-0".into();
+    report.events[1].details = "retained-sentinel-1".into();
+    report.events[100].details = "retained-sentinel-100".into();
+    let mut output = Vec::new();
+    report
+        .write_summary(&mut output, &summary_policy(crate::ui::ColorMode::Never))
+        .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("discarded-sentinel-0"));
+    assert!(output.contains("retained-sentinel-1"));
+    assert!(output.contains("retained-sentinel-100"));
+}

@@ -1,5 +1,6 @@
 use crate::behavior::ThreatDetection;
 use crate::report::{Event, EventType};
+use crate::ui::{self, Panel, PromptEnd, Tone};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
@@ -107,11 +108,38 @@ impl InteractiveController {
     }
 
     pub fn prompt_for_event(&mut self, event: &Event) -> UserDecision {
-        fail_closed(self.prompt_for_event_with_io(
-            event,
-            &mut io::stdin().lock(),
-            &mut io::stdout().lock(),
-        ))
+        if let Some(decision) = self.cached_decision(&event.event_type) {
+            return decision;
+        }
+
+        let decision = fail_closed(present_decision(
+            &Panel {
+                title: "Observed event / review".into(),
+                tone: Tone::Warning,
+                fields: vec![
+                    ("Event".into(), format!("{:?}", event.event_type)),
+                    ("Details".into(), event.details.clone()),
+                    ("Time".into(), event.timestamp.to_string()),
+                ],
+                notes: vec![
+                    "Post-event review cannot prevent or undo this activity.".into(),
+                    "[A] Accept / [B] Flag suspicious / [T] Terminate / [C] Continue this type"
+                        .into(),
+                    "[AA] Accept future events of this type / [BB] Flag future events of this type"
+                        .into(),
+                ],
+            },
+            true,
+        ));
+
+        if matches!(
+            decision,
+            UserDecision::AllowAll | UserDecision::BlockAll | UserDecision::Continue
+        ) {
+            self.policies.insert(event.event_type.clone(), decision);
+        }
+
+        decision
     }
 
     pub fn prompt_for_event_with_io(
@@ -158,10 +186,31 @@ impl InteractiveController {
     }
 
     pub fn prompt_user(&mut self, threat: &ThreatDetection) -> UserDecision {
-        fail_closed(self.prompt_user_with_io(
-            threat,
-            &mut io::stdin().lock(),
-            &mut io::stdout().lock(),
+        if let Some(decision) = self.automatic {
+            return match decision {
+                UserDecision::AllowAll => UserDecision::Allow,
+                UserDecision::BlockAll => UserDecision::Block,
+                other => other,
+            };
+        }
+
+        let mut notes = threat.evidence.clone();
+        notes.extend([
+            "Post-event review cannot prevent or undo this activity.".into(),
+            "[A] Accept / [B] Flag suspicious / [C] Continue / [T] Terminate".into(),
+        ]);
+        fail_closed(present_decision(
+            &Panel {
+                title: "Observed behavior / review".into(),
+                tone: Tone::Warning,
+                fields: vec![
+                    ("Threat".into(), threat.threat_type.clone()),
+                    ("Level".into(), format!("{:?}", threat.level)),
+                    ("Details".into(), threat.description.clone()),
+                ],
+                notes,
+            },
+            false,
         ))
     }
 
@@ -214,6 +263,28 @@ impl InteractiveController {
         } else if self.automatic == Some(UserDecision::BlockAll) {
             self.automatic = None;
         }
+    }
+}
+
+fn present_decision(panel: &Panel, allow_cached: bool) -> io::Result<UserDecision> {
+    /* The legacy synchronous API retains stdin ownership only. Prompt guards
+     * release the human sink lock before waiting, so concurrent diagnostics
+     * queue safely instead of deadlocking behind a stdout lock. */
+    let mut input = io::stdin().lock();
+    loop {
+        let prompt = ui::terminal().begin_prompt(panel)?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Decision input closed",
+            ));
+        }
+        prompt.finish(PromptEnd::Answered)?;
+        if let Some(decision) = parse_decision(&line, allow_cached) {
+            return Ok(decision);
+        }
+        ui::terminal().status("Unrecognized decision; use a listed key.", Tone::Warning)?;
     }
 }
 

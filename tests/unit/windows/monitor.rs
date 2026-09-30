@@ -3,6 +3,11 @@ use crate::sandbox::{process::create_sandboxed_process, wait::HandleWait, Sandbo
 use anyhow::Context;
 use std::time::Duration;
 
+/* Full sessions share the process-wide human terminal, just as the CLI does.
+ * Serialize only these terminal-owning integration cases; other platform tests
+ * retain parallel execution and do not contend for prompt/activity ownership. */
+static SESSION_TERMINAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn command_interpreter() -> Result<String> {
     let directory = std::env::var_os("SystemRoot").context("Windows directory is unavailable")?;
     std::path::PathBuf::from(directory)
@@ -34,6 +39,7 @@ fn event_retention_keeps_the_newest_entries_in_order() {
 
 #[tokio::test]
 async fn library_execution_sets_executable_and_joins_observers() -> Result<()> {
+    let _terminal = SESSION_TERMINAL.lock().await;
     let output = tempfile::tempdir()?;
     let config = SandboxConfig {
         enable_api_hooks: false,
@@ -62,6 +68,7 @@ async fn library_execution_sets_executable_and_joins_observers() -> Result<()> {
 
 #[tokio::test]
 async fn requested_hook_startup_failure_never_runs_the_primary_thread() -> Result<()> {
+    let _terminal = SESSION_TERMINAL.lock().await;
     use crate::ipc::HookIpcServer;
     use crate::sandbox::resource::OwnedHandle;
     use windows::Win32::System::Threading::GetExitCodeProcess;
@@ -99,6 +106,7 @@ async fn requested_hook_startup_failure_never_runs_the_primary_thread() -> Resul
 
 #[tokio::test]
 async fn startup_deadline_terminates_without_resuming() -> Result<()> {
+    let _terminal = SESSION_TERMINAL.lock().await;
     let config = SandboxConfig {
         timeout: Duration::ZERO,
         interactive_mode: false,

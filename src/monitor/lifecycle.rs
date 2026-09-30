@@ -1,4 +1,9 @@
-use super::{hooks, input::ConsoleInput, review, tasks::MonitorTasks};
+use super::{
+    hooks,
+    input::{ConsoleInput, InputEnd},
+    review,
+    tasks::MonitorTasks,
+};
 use crate::behavior::BehaviorAnalyzer;
 use crate::config::SandboxConfig;
 use crate::control::UserDecision;
@@ -8,11 +13,11 @@ use crate::sandbox::deadline::Deadline;
 use crate::sandbox::process::ProcessHandle;
 use crate::sandbox::resource::with_cleanup;
 use crate::sandbox::wait::wait_for_handle;
+use crate::ui::{self, Panel, PromptEnd, Tone};
 use anyhow::{anyhow, bail, Context, Result};
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 pub(super) struct Session {
     observers: Option<MonitorTasks>,
@@ -40,18 +45,51 @@ impl Session {
         if !self.process.is_suspended {
             bail!("monitoring requires an initially suspended process");
         }
-        if config.interactive_mode {
+        let mut signal =
+            tokio::signal::windows::ctrl_c().context("register Ctrl-C cancellation")?;
+        if config.interactive_mode || redirected_pipe()? {
             self.input = Some(ConsoleInput::new()?);
-            println!("\nProcess {} is suspended.", self.process.process_id);
-            println!("Startup approval permits loader and hook initialization,");
-            println!("then execution of the target's primary thread.");
-            println!("Allow startup? [Y/N]");
-            std::io::stdout().flush()?;
+        }
+        let mut status = self.input.as_ref().map(ConsoleInput::status);
+
+        /* Cancellation owns the outer race across every startup and running
+         * await. Explicit checks at release boundaries cover work completed
+         * within a single poll before this select can be polled again. */
+        tokio::select! {
+            biased;
+            result = cancelled(&mut status, &mut signal) => result,
+            result = self.run_active(config, events, deadline) => result,
+        }
+    }
+
+    async fn run_active(
+        &mut self,
+        config: &SandboxConfig,
+        events: Arc<Mutex<Vec<Event>>>,
+        deadline: Deadline,
+    ) -> Result<u32> {
+        let initialization = ui::terminal().activity("Initializing suspended target")?;
+        if config.interactive_mode {
             let input = self
                 .input
                 .as_mut()
                 .context("console reader was not initialized")?;
-            if !input.read_line().await?.trim().eq_ignore_ascii_case("Y") {
+            let status = input.status();
+            let answer = input.read_line();
+            let prompt = ui::terminal().begin_prompt(&Panel {
+                title: "Startup approval".into(),
+                tone: Tone::Warning,
+                fields: vec![("Suspended PID".into(), self.process.process_id.to_string())],
+                notes: vec![
+                    "Approval permits loader and hook initialization, then the target's primary thread.".into(),
+                    "[Y] Allow startup / [N] Deny (default). Ctrl-C cancels.".into(),
+                ],
+            })?;
+            let answer = answer.await?;
+            tokio::task::yield_now().await;
+            check_input(&status)?;
+            prompt.finish(PromptEnd::Answered)?;
+            if !answer.trim().eq_ignore_ascii_case("Y") {
                 bail!("user denied process startup");
             }
         }
@@ -77,17 +115,29 @@ impl Session {
         /* Registration precedes resume so even an immediately exiting process
         has a completion notification. No readiness sleeps are necessary. */
         let mut process_wait = crate::sandbox::wait::HandleWait::new(self.process.process_handle)?;
-        let resume = deadline
-            .check()
+        /* Give the outer biased cancellation race a release checkpoint even
+         * when initialization completed without a pending await. */
+        tokio::task::yield_now().await;
+        let resume = self
+            .input
+            .as_ref()
+            .map_or(Ok(()), |input| check_input(&input.status()))
+            .and_then(|()| deadline.check())
             .and_then(|()| self.process.resume_initial_thread());
         if let Err(error) = resume {
             return with_cleanup(Err(error), process_wait.close());
         }
+        initialization.finish(
+            "Initialization complete; primary thread resumed",
+            Tone::Success,
+        )?;
+        let running = ui::terminal().activity("Running target and observing activity")?;
         let observers = self
             .observers
             .as_mut()
             .context("observers were not initialized")?;
         let (reviews, review_broker) = review::channel();
+        let input_status = self.input.as_ref().map(ConsoleInput::status);
         let result = tokio::select! {
             biased;
             result = process_wait.wait() => {
@@ -97,7 +147,7 @@ impl Session {
             result = observers.ended() => {
                 result.and_then(|()| Err(anyhow!("observation worker stopped while the target was running")))
             }
-            result = hooks::serve(self.server.as_mut(), &reviews, config, events.clone()) => {
+            result = hooks::serve(self.server.as_mut(), &reviews, config, events.clone(), input_status.as_ref()) => {
                 /* Pipe disconnect and process exit can arrive together. Only a
                    confirmed OS exit makes a disconnect normal. */
                 match result {
@@ -113,10 +163,18 @@ impl Session {
             result = analyze(config, events, &reviews) => result.and_then(|()| Err(anyhow!("behavior analysis stopped"))),
             result = review_broker.run(self.input.as_mut()) => result.and_then(|()| Err(anyhow!("interactive review service stopped"))),
         };
+        let (outcome, tone) = match &result {
+            Ok(0) => ("Target exited successfully", Tone::Success),
+            Ok(_) => ("Target exited with a nonzero status", Tone::Warning),
+            Err(_) => ("Target monitoring stopped with an error", Tone::Danger),
+        };
+        let presentation = running.finish(outcome, tone).map_err(Into::into);
+        let result = with_cleanup(result, presentation);
         with_cleanup(result, process_wait.close())
     }
 
     pub(super) async fn close(&mut self, code: u32) -> Result<()> {
+        let activity = ui::terminal().activity("Cleaning up target, readers and observers");
         let mut result = self.process.terminate(code);
         if let Some(server) = self.server.as_mut() {
             result = with_cleanup(result, server.disconnect());
@@ -138,7 +196,23 @@ impl Session {
         .context("terminated process did not exit within cleanup deadline")
         .and_then(|result| result);
         result = with_cleanup(result, waited);
-        with_cleanup(result, self.process.close())
+        result = with_cleanup(result, self.process.close());
+        let presentation = match activity {
+            Ok(activity) => activity.finish(
+                if result.is_ok() {
+                    "Cleanup complete"
+                } else {
+                    "Cleanup failed"
+                },
+                if result.is_ok() {
+                    Tone::Success
+                } else {
+                    Tone::Danger
+                },
+            ),
+            Err(error) => Err(error),
+        };
+        with_cleanup(result, presentation.map_err(Into::into))
     }
 }
 
@@ -151,6 +225,50 @@ impl Drop for Session {
                 log::error!("Cancelled session termination failed: {error:#}");
             }
         }
+    }
+}
+
+fn redirected_pipe() -> Result<bool> {
+    use windows::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
+    use windows::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+
+    /* SAFETY: The standard handle is only queried, never closed or retained.
+     * Noninteractive native sessions need only the independent Ctrl-C stream. */
+    let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) }?;
+    Ok(unsafe { GetFileType(input) } == FILE_TYPE_PIPE)
+}
+
+pub(super) fn check_input(status: &watch::Receiver<Option<InputEnd>>) -> Result<()> {
+    match status.borrow().clone() {
+        None => Ok(()),
+        Some(InputEnd::Eof) => bail!("input closed; session cancelled"),
+        Some(InputEnd::Cancelled) => bail!("user cancelled session"),
+        Some(InputEnd::Failed(error)) => bail!("input failed: {error}"),
+    }
+}
+
+async fn input_ended(status: &mut Option<watch::Receiver<Option<InputEnd>>>) -> Result<()> {
+    let Some(status) = status else {
+        return std::future::pending().await;
+    };
+
+    loop {
+        check_input(status)?;
+        status
+            .changed()
+            .await
+            .context("input status channel closed")?;
+    }
+}
+
+async fn cancelled(
+    status: &mut Option<watch::Receiver<Option<InputEnd>>>,
+    signal: &mut tokio::signal::windows::CtrlC,
+) -> Result<u32> {
+    tokio::select! {
+        biased;
+        _ = signal.recv() => bail!("Ctrl-C; session cancelled"),
+        result = input_ended(status) => { result?; bail!("input reader stopped") },
     }
 }
 

@@ -130,7 +130,7 @@ async fn hook_and_behavior_reviews_share_one_serial_decider() -> Result<()> {
         let mut service = Box::pin(broker.dispatch(async |review| {
             assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
             let index = started.fetch_add(1, Ordering::SeqCst);
-            review.write_prompt(&mut Vec::new())?;
+            let _panel = review.panel();
             let decision = match review {
                 Review::Hook { .. } => {
                     assert_eq!(index, 0);

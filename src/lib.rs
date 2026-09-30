@@ -17,6 +17,7 @@ pub mod monitor;
 pub mod report;
 #[cfg(windows)]
 pub mod sandbox;
+pub mod ui;
 
 pub use config::SandboxConfig;
 pub use report::SandboxReport;

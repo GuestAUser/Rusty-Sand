@@ -17,6 +17,9 @@ fn preserves_defaults_when_only_executable_is_given() {
     assert!(!args.internet);
     assert!(!args.dns);
     assert!(!args.verbose);
+    assert_eq!(args.color, ColorChoice::Auto);
+    assert!(!args.plain);
+    assert!(!args.reduced_motion);
     assert!(!args.log_network);
     assert!(!args.no_registry);
     assert!(!args.no_interactive);
@@ -83,4 +86,47 @@ fn rejects_malformed_numeric_arguments() {
 
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
     }
+}
+
+#[test]
+fn presentation_options_preserve_explicit_policy() {
+    for (value, expected) in [
+        ("auto", ColorMode::Auto),
+        ("always", ColorMode::Always),
+        ("never", ColorMode::Never),
+    ] {
+        let args = Args::try_parse_from([
+            "rusty_sand",
+            "target.exe",
+            "--color",
+            value,
+            "--plain",
+            "--reduced-motion",
+        ])
+        .unwrap();
+        let policy = args.output_policy();
+        assert_eq!(policy.color, expected);
+        assert!(policy.plain);
+        assert!(policy.reduced_motion);
+    }
+
+    let error =
+        Args::try_parse_from(["rusty_sand", "target.exe", "--color", "rainbow"]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidValue);
+}
+
+#[test]
+fn presentation_flags_after_separator_belong_to_target() {
+    let args = Args::try_parse_from([
+        "rusty_sand",
+        "target.exe",
+        "--",
+        "--color",
+        "never",
+        "--plain",
+    ])
+    .unwrap();
+    assert_eq!(args.color, ColorChoice::Auto);
+    assert!(!args.plain);
+    assert_eq!(args.args, ["--color", "never", "--plain"]);
 }

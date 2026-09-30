@@ -4,3 +4,6 @@
 /example_report.json
 /rusty_sand_hooks/target/
 *.pdb
+__pycache__/
+*.py[cod]
+*:Zone.Identifier

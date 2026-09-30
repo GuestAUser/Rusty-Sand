@@ -5,8 +5,8 @@ use crate::behavior::{ThreatDetection, ThreatLevel};
 use crate::config::SandboxConfig;
 use crate::control::UserDecision;
 use crate::report::{Event, EventType};
+use crate::ui::{self, Panel, PromptEnd, Tone};
 use anyhow::{bail, Context, Result};
-use std::io::Write;
 use std::ops::AsyncFnMut;
 use tokio::sync::{mpsc, oneshot};
 
@@ -81,14 +81,35 @@ impl ReviewBroker {
             let input = input
                 .as_deref_mut()
                 .context("interactive review has no console reader")?;
-            review.write_prompt(&mut std::io::stdout())?;
             loop {
-                std::io::stdout().flush()?;
-                let line = input.read_line().await?;
+                let status = input.status();
+                let answer = input.read_line();
+                let prompt = ui::terminal().begin_prompt(&review.panel())?;
+                let line = answer.await?;
+                tokio::task::yield_now().await;
+                super::lifecycle::check_input(&status)?;
+                prompt.finish(PromptEnd::Answered)?;
+
                 if let Some(decision) = review.parse_decision(&line) {
+                    if matches!(review, Review::Hook { .. }) {
+                        let (selection, tone) = match decision {
+                            UserDecision::Allow => ("Allow this operation", Tone::Success),
+                            UserDecision::AllowAll => ("Allow this operation type", Tone::Success),
+                            UserDecision::Block | UserDecision::Continue => {
+                                ("Deny this operation", Tone::Danger)
+                            }
+                            UserDecision::BlockAll => ("Deny this operation type", Tone::Danger),
+                            UserDecision::Terminate => ("Terminate the target", Tone::Danger),
+                        };
+                        ui::terminal().status(&format!("Decision: {selection}"), tone)?;
+                    }
                     return Ok(decision);
                 }
-                print!("Unrecognized decision; enter A, B, C, or T: ");
+
+                ui::terminal().status(
+                    "Unrecognized decision; use one of the listed keys.",
+                    Tone::Warning,
+                )?;
             }
         })
         .await
@@ -112,41 +133,49 @@ impl ReviewBroker {
 }
 
 impl Review {
-    fn write_prompt(&self, output: &mut impl Write) -> std::io::Result<()> {
+    fn panel(&self) -> Panel {
         match self {
-            Self::Hook { description, risk } => {
-                writeln!(
-                    output,
-                    "\nHook request: {description}\nRisk: {}/100 ({})",
-                    risk.score,
-                    risk.category.as_str()
-                )?;
-                writeln!(
-                    output,
-                    "[Y]es / [A]llow this type / [N]o / [D]eny this type / [T]erminate"
-                )
-            }
+            Self::Hook { description, risk } => Panel {
+                title: "Intercepted operation / approval required".into(),
+                tone: if risk.score > 60 {
+                    Tone::Danger
+                } else {
+                    Tone::Warning
+                },
+                fields: vec![
+                    ("Operation".into(), description.clone()),
+                    (
+                        "Risk".into(),
+                        format!("{}/100 ({})", risk.score, risk.category.as_str()),
+                    ),
+                ],
+                notes: vec![
+                    "[Y] Yes / [A] Allow this type / [N] No / [D] Deny this type / [T] Terminate"
+                        .into(),
+                    "Only Y or A approves. Empty or unknown input denies. Ctrl-C cancels.".into(),
+                ],
+            },
             Self::Observation(threat) => {
-                writeln!(
-                    output,
-                    "\nObserved behavior: {} ({:?})\n{}",
-                    threat.threat_type, threat.level, threat.description
-                )?;
-                for evidence in &threat.evidence {
-                    writeln!(output, "Evidence: {evidence}")?;
+                let mut notes = threat
+                    .evidence
+                    .iter()
+                    .map(|evidence| format!("Evidence: {evidence}"))
+                    .collect::<Vec<_>>();
+                notes.extend([
+                    "Post-event review: the target continues running. Flagging cannot undo or prevent observed activity.".into(),
+                    "[A] Accept / [B] Flag suspicious / [C] Continue / [T] Terminate. Ctrl-C cancels.".into(),
+                ]);
+
+                Panel {
+                    title: "Observed behavior / review".into(),
+                    tone: Tone::Warning,
+                    fields: vec![
+                        ("Observation".into(), threat.threat_type.clone()),
+                        ("Level".into(), format!("{:?}", threat.level)),
+                        ("Details".into(), threat.description.clone()),
+                    ],
+                    notes,
                 }
-                writeln!(
-                    output,
-                    "This is a post-event review; the target continues running."
-                )?;
-                writeln!(
-                    output,
-                    "Block cannot undo or prevent previously observed activity."
-                )?;
-                writeln!(
-                    output,
-                    "[A]ccept / [B] Flag suspicious / [C]ontinue / [T]erminate"
-                )
             }
         }
     }

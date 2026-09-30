@@ -1,4 +1,4 @@
-use super::review::ReviewClient;
+use super::{input::InputEnd, lifecycle::check_input, review::ReviewClient};
 use crate::config::SandboxConfig;
 use crate::control::UserDecision;
 use crate::ipc::{HookIpcServer, HookOperation, HookResponse};
@@ -13,6 +13,7 @@ pub(super) async fn serve(
     reviews: &ReviewClient,
     config: &SandboxConfig,
     events: Arc<Mutex<Vec<Event>>>,
+    input_status: Option<&tokio::sync::watch::Receiver<Option<InputEnd>>>,
 ) -> Result<()> {
     let Some(server) = server else {
         return std::future::pending().await;
@@ -73,6 +74,12 @@ pub(super) async fn serve(
             });
         }
         drop(events);
+        /* Re-enter the session cancellation race before releasing a target
+         * thread, including decisions resolved entirely from cached policy. */
+        tokio::task::yield_now().await;
+        if let Some(status) = input_status {
+            check_input(status)?;
+        }
         server
             .send_response(&HookResponse {
                 allowed,

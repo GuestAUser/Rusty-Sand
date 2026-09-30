@@ -35,3 +35,54 @@ async fn should_pause_detection_reaches_review_and_requests_termination() -> Res
         .any(|event| event.event_type == EventType::HookBlocked));
     Ok(())
 }
+
+#[tokio::test]
+async fn input_end_cancels_without_waiting_for_an_active_prompt() -> Result<()> {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    for end in [
+        InputEnd::Eof,
+        InputEnd::Cancelled,
+        InputEnd::Failed("transport".into()),
+    ] {
+        let (send, receive) = watch::channel(None);
+        let mut status = Some(receive);
+        let mut cancellation = Box::pin(input_ended(&mut status));
+        poll_fn(|context| {
+            assert!(cancellation.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        send.send_replace(Some(end));
+        let result = tokio::time::timeout(Duration::from_secs(5), cancellation).await?;
+        assert!(result.is_err());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn already_closed_input_wins_over_ready_work() {
+    for end in [
+        InputEnd::Eof,
+        InputEnd::Cancelled,
+        InputEnd::Failed("transport".into()),
+    ] {
+        let (_send, receive) = watch::channel(Some(end));
+        assert!(check_input(&receive).is_err());
+        let mut status = Some(receive);
+        let result = tokio::select! {
+            biased;
+            result = input_ended(&mut status) => result,
+            () = std::future::ready(()) => panic!("cancelled input released ready work"),
+        };
+        assert!(result.is_err());
+    }
+}
+
+#[tokio::test]
+async fn abandoned_input_status_fails_closed() {
+    let (send, receive) = watch::channel(None);
+    drop(send);
+    assert!(input_ended(&mut Some(receive)).await.is_err());
+}
