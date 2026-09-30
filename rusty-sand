@@ -122,6 +122,7 @@ def translate_arguments(arguments, cwd):
 
 def backend_environment(source):
     environment = source.copy()
+    environment["RUSTY_SAND_STDIN_CONTROL"] = "1"
     environment["RUSTY_SAND_STDERR_TTY"] = "1" if os.isatty(2) else "0"
     try:
         columns = os.get_terminal_size(2).columns
@@ -129,9 +130,12 @@ def backend_environment(source):
         columns = 80
     environment["RUSTY_SAND_COLUMNS"] = str(columns)
 
-    # Display hints are never authorization. Preserve unrelated WSLENV entries
-    # while removing any path-translation flags on these non-path values.
-    names = ["RUSTY_SAND_STDERR_TTY", "RUSTY_SAND_COLUMNS", "TERM", "NO_COLOR"]
+    # The launcher owns its input pipe; closure is an explicit cancellation
+    # signal, unlike ambient CI/library stdin. Display hints remain UI-only.
+    names = [
+        "RUSTY_SAND_STDIN_CONTROL", "RUSTY_SAND_STDERR_TTY",
+        "RUSTY_SAND_COLUMNS", "TERM", "NO_COLOR",
+    ]
     entries = [
         entry for entry in environment.get("WSLENV", "").split(":")
         if entry and entry.split("/", 1)[0] not in names

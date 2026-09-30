@@ -125,7 +125,10 @@ before `--`, the WSL launcher leaves its backend pipe open after ordinary stdin
 EOF, so redirected runs such as `./rusty-sand program.exe --no-interactive < /dev/null`
 can complete normally. Target arguments after `--` do not select this behavior.
 SIGINT and SIGTERM still close the backend pipe in either mode, and the launcher
-waits for cleanup. Actual backend pipe closure remains a cancellation signal.
+waits for cleanup. The launcher explicitly marks its owned stdin control pipe;
+closure of that pipe remains a cancellation signal. Noninteractive library calls
+ignore ambient stdin, including closed CI pipes, unless the caller opts into
+`SandboxConfig::cancel_on_stdin_eof`. This runtime setting is not serialized.
 Cancellation terminates the target job and joins input and observation workers
 before reporting the failure.
 

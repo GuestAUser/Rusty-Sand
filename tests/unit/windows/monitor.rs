@@ -18,6 +18,50 @@ fn command_interpreter() -> Result<String> {
         .map_err(|_| anyhow::anyhow!("Windows directory is not Unicode"))
 }
 
+#[tokio::test]
+async fn noninteractive_library_execution_ignores_closed_process_stdin() -> Result<()> {
+    use crate::sandbox::wait::wait_for_handle;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Command, Stdio};
+    use windows::Win32::Foundation::HANDLE;
+
+    /*
+     * Isolate process-global stdin in a child harness, leaving parallel tests
+     * untouched. Re-run the original behavioral test with an already closed
+     * pipe, matching CI rather than changing its assertions or input policy.
+     */
+    let mut child = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "monitor::tests::library_execution_sets_executable_and_joins_observers",
+            "--nocapture",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    drop(child.stdin.take());
+
+    let completed = tokio::time::timeout(
+        Duration::from_secs(20),
+        wait_for_handle(HANDLE(child.as_raw_handle() as isize)),
+    )
+    .await;
+    if !matches!(&completed, Ok(Ok(()))) {
+        child.kill()?;
+    }
+    let output = child.wait_with_output()?;
+    completed.context("closed-stdin library regression did not finish")??;
+    assert!(
+        output.status.success(),
+        "child status: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    Ok(())
+}
+
 #[test]
 fn event_retention_keeps_the_newest_entries_in_order() {
     let timestamp = Utc::now();

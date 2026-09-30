@@ -6,6 +6,18 @@ fn default_configuration_does_not_request_unsupported_enforcement() {
 }
 
 #[test]
+fn stdin_control_requires_runtime_opt_in_and_is_not_serialized_policy() {
+    let mut config = SandboxConfig::new();
+    assert!(!config.cancel_on_stdin_eof);
+    config.cancel_on_stdin_eof = true;
+
+    let policy = serde_json::to_value(&config).unwrap();
+    assert!(policy.get("cancel_on_stdin_eof").is_none());
+    let decoded: SandboxConfig = serde_json::from_value(policy).unwrap();
+    assert!(!decoded.cancel_on_stdin_eof);
+}
+
+#[test]
 fn filesystem_allowlist_is_rejected_instead_of_silently_ignored() {
     let config = SandboxConfig {
         allowed_file_patterns: vec![r"C:\Allowed\*".into()],

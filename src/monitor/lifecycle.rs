@@ -47,7 +47,7 @@ impl Session {
         }
         let mut signal =
             tokio::signal::windows::ctrl_c().context("register Ctrl-C cancellation")?;
-        if config.interactive_mode || redirected_pipe()? {
+        if config.interactive_mode || (config.cancel_on_stdin_eof && redirected_pipe()?) {
             self.input = Some(ConsoleInput::new()?);
         }
         let mut status = self.input.as_ref().map(ConsoleInput::status);

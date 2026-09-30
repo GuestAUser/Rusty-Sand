@@ -61,6 +61,15 @@ pub struct SandboxConfig {
     /// Enable interactive mode (pause on suspicious behavior)
     pub interactive_mode: bool,
 
+    /**
+    Opt into EOF cancellation for a caller-owned input control pipe.
+
+    Noninteractive library sessions otherwise leave process stdin alone.
+    This runtime transport setting is not part of serialized report policy.
+    */
+    #[serde(skip)]
+    pub cancel_on_stdin_eof: bool,
+
     /// Enable behavioral analysis
     pub enable_behavior_detection: bool,
 
@@ -86,6 +95,7 @@ impl Default for SandboxConfig {
             log_network_packets: false,
             enable_api_hooks: true,
             interactive_mode: true,
+            cancel_on_stdin_eof: false,
             enable_behavior_detection: true,
             auto_terminate_on_critical: false,
             output_dir: PathBuf::from("./sandbox_output"),

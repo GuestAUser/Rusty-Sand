@@ -95,6 +95,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     config.log_network_packets = args.log_network;
     config.allow_registry = !args.no_registry;
     config.interactive_mode = !args.no_interactive;
+    config.cancel_on_stdin_eof = std::env::var("RUSTY_SAND_STDIN_CONTROL").as_deref() == Ok("1");
     config.enable_behavior_detection = !args.no_behavior_detection;
 
     ui::terminal().panel(&Panel {

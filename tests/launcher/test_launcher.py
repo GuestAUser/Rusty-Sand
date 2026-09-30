@@ -131,8 +131,9 @@ class EntryTests(unittest.TestCase):
         with mock.patch.object(os, "isatty", return_value=True), mock.patch.object(os, "get_terminal_size", return_value=os.terminal_size((132, 40))):
             result = launcher.backend_environment(source)
         self.assertEqual(result["RUSTY_SAND_STDERR_TTY"], "1")
+        self.assertEqual(result["RUSTY_SAND_STDIN_CONTROL"], "1")
         self.assertEqual(result["RUSTY_SAND_COLUMNS"], "132")
-        self.assertEqual(result["WSLENV"].split(":"), ["KEEP/p", "OTHER/lu", "RUSTY_SAND_STDERR_TTY", "RUSTY_SAND_COLUMNS", "TERM", "NO_COLOR"])
+        self.assertEqual(result["WSLENV"].split(":"), ["KEEP/p", "OTHER/lu", "RUSTY_SAND_STDIN_CONTROL", "RUSTY_SAND_STDERR_TTY", "RUSTY_SAND_COLUMNS", "TERM", "NO_COLOR"])
         self.assertEqual(source["WSLENV"], "KEEP/p:OTHER/lu:TERM/p:RUSTY_SAND_COLUMNS/p")
 
 class TransportTests(unittest.TestCase):
