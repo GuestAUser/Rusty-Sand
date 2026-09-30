@@ -72,6 +72,23 @@ request is not counted as a denial simply because it was intercepted. A denied
 request is recorded separately; human-readable details are not a typed result
 schema.
 
+## Terminal and input surfaces
+
+The WSL launcher runs the x64 Windows backend in place and forwards input over a
+cancellable UTF-8 pipe. Native Windows uses cancellable console events.
+Interactive EOF, Ctrl-C, transport failure, and session deadlines fail closed.
+For WSL `--no-interactive` runs, ordinary stdin EOF leaves the backend pipe open;
+SIGINT and SIGTERM still close it and request cleanup. Cancellation is checked
+before startup resume and approval replies. Input queued before a prompt cannot
+authorize a later request. No new APIs are intercepted by this interface.
+
+Human output uses a synchronized stderr renderer with semantic colors, bounded
+prompt-time diagnostic buffering, narrow-terminal wrapping, and real-work activity
+indicators. `--color auto|always|never`, `--plain`, and `--reduced-motion` select
+presentation without changing policy. Redirected/dumb terminals and `NO_COLOR`
+receive conservative defaults. JSON serialization remains unchanged; human report
+counts describe retained events, not a verdict that the target is safe.
+
 ## Validation boundary
 
 Portable tests cover schemas, classification, scoring, report projections, and

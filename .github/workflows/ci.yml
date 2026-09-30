@@ -27,6 +27,14 @@ jobs:
         run: rustup show
       - run: cargo test --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test WSL launcher argument and transport contracts
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s tests/launcher -v
+      - name: Test terminal QA helpers
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s tests/qa -v
 
   miri:
     runs-on: ubuntu-latest

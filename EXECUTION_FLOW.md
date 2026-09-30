@@ -8,6 +8,8 @@ asks the executable to approve intercepted operations over a local named pipe.
 
 | Responsibility | Implementation |
 | --- | --- |
+| In-place WSL path conversion and cancellation bridge | `rusty-sand` |
+| Serialized human output and prompt/activity guards | `src/ui/` |
 | CLI parsing and report selection | `src/cli.rs`, `src/main.rs` |
 | Public execution entry point | `src/lib.rs`, `src/sandbox/mod.rs` |
 | Process, thread, and Job Object ownership | `src/sandbox/process.rs` |
@@ -21,6 +23,33 @@ asks the executable to approve intercepted operations over a local named pipe.
 | Hook registration and callbacks | `rusty_sand_hooks/src/` |
 | Observations and event analysis | `src/monitor/`, `src/behavior/` |
 | Report schema and projections | `src/report/` |
+
+## Presentation and input ownership
+
+The CLI resolves explicit display flags and launcher/native terminal capabilities
+once, then routes human output and filtered `RUST_LOG` diagnostics through stderr.
+Configuration appears before execution. Activity guards cover initialization,
+running, and cleanup, and hold no renderer mutex across waits. Prompt guards
+suspend activity and queue diagnostics until a decision or cancellation restores
+scrolling output. Summary rendering begins only after teardown has stopped all
+producers; the library's stdout summary entry point remains available.
+
+WSL translates only launcher-owned paths and preserves target arguments. The
+launcher forwards terminal hints and leaves terminal echo to its caller. Native
+console edits use renderer input events; pipe bytes are not echoed by the backend.
+The reader arms each request before its prompt is displayed and rejects stale
+pre-prompt input. Hook and observation reviews share one bounded serial broker.
+
+A biased outer cancellation race observes the input status watch channel and a
+native Ctrl-C stream throughout startup, injection, and execution. Release
+checkpoints let pending cancellation win before primary-thread resume and hook
+replies. Closing the backend pipe cancels the session in either mode. In
+interactive mode, the WSL launcher forwards ordinary stdin EOF as pipe closure.
+With `--no-interactive` before the target-argument separator, it instead retains
+the backend pipe after stdin EOF so redirected execution can finish normally.
+SIGINT and SIGTERM always close the pipe and wait for cleanup. Native
+noninteractive console sessions retain independent Ctrl-C handling without
+needing an approval reader.
 
 ## Startup
 
