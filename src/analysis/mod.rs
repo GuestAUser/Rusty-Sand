@@ -1,8 +1,5 @@
-//! Threat analysis and risk scoring for hooked operations
-//!
-//! This module provides real-time risk assessment for intercepted operations,
-//! helping users make informed decisions about allowing or blocking actions.
+//! Heuristic risk scoring for intercepted operations, not malware verdicts.
 
 pub mod risk_scorer;
 
-pub use risk_scorer::{RiskScore, ThreatCategory, analyze_operation};
+pub use risk_scorer::{analyze_operation, analyze_request, RiskScore, ThreatCategory};

@@ -1,122 +1,88 @@
-//! Network operation hooks (connect, send, recv)
+use crate::approval::approve;
+use crate::buffers::{self, BufferError};
+use crate::installation::{InitializationError, Installation};
+use crate::types::{HookOperation, NetworkProtocol};
+use crate::utils::{copy_caller_bytes, InspectionError};
+use std::sync::OnceLock;
+use windows::core::PSTR;
+use windows::Win32::Networking::WinSock::{
+    getsockopt, WSAGetLastError, WSASetLastError, SOCKADDR, SOCKET, SOCKET_ERROR, SOCK_DGRAM,
+    SOCK_STREAM, SOL_SOCKET, SO_TYPE, WSAEACCES,
+};
 
-use crate::hooks::file_hooks::IPC_CLIENT;
-use crate::types::{HookOperation, HookRequest, NetworkProtocol};
-use minhook::MinHook;
-use windows::Win32::Networking::WinSock::{SOCKADDR, SOCKET};
-use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+type Connect = unsafe extern "system" fn(SOCKET, *const SOCKADDR, i32) -> i32;
+static CONNECT: OnceLock<Connect> = OnceLock::new();
 
-// Original function pointers
-static mut ORIG_CONNECT: Option<FnConnect> = None;
-
-// Function type definitions
-type FnConnect = unsafe extern "system" fn(SOCKET, *const SOCKADDR, i32) -> i32;
-
-/// Request approval from main process via IPC
-fn request_approval(operation: HookOperation) -> bool {
-    let client_guard = IPC_CLIENT.lock();
-
-    if let Some(client) = client_guard.as_ref() {
-        let request = HookRequest {
-            operation,
-            pid: unsafe { GetCurrentProcessId() },
-            tid: unsafe { GetCurrentThreadId() },
-        };
-
-        match client.request_approval(&request) {
-            Ok(response) => response.allowed,
-            Err(_) => false,
+unsafe extern "system" fn connect(socket: SOCKET, name: *const SOCKADDR, length: i32) -> i32 {
+    /* SAFETY: WSAGetLastError reads only the calling thread's socket error. */
+    let saved_error = unsafe { WSAGetLastError() };
+    let Some(original) = CONNECT.get() else {
+        return denied();
+    };
+    if !approve(|| {
+        let length = usize::try_from(length).map_err(|_| BufferError::InvalidLength)?;
+        if length < 2 {
+            return Err(BufferError::InvalidLength.into());
         }
-    } else {
-        false
-    }
-}
-
-/// Hooked connect - intercepts network connections BEFORE execution
-unsafe extern "system" fn hooked_connect(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
-    // Extract IP and port from sockaddr structure
-    let (addr, port, protocol) = if !name.is_null() && namelen >= 16 {
-        let sockaddr = &*name;
-
-        // Extract address family (AF_INET = 2, AF_INET6 = 23)
-        let family_bytes = std::slice::from_raw_parts(sockaddr as *const _ as *const u8, 2);
-        let family = u16::from_le_bytes([family_bytes[0], family_bytes[1]]);
-
-        // Extract port (big-endian at offset 2)
-        let port_bytes = std::slice::from_raw_parts((sockaddr as *const _ as *const u8).offset(2), 2);
-        let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
-
-        // Extract IP address based on family
-        let (addr, protocol) = if family == 2 {
-            // AF_INET (IPv4)
-            let ip_bytes = std::slice::from_raw_parts((sockaddr as *const _ as *const u8).offset(4), 4);
-            let addr = format!("{}.{}.{}.{}", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-            (addr, NetworkProtocol::Tcp)
-        } else if family == 23 {
-            // AF_INET6 (IPv6)
-            let ip_bytes = std::slice::from_raw_parts((sockaddr as *const _ as *const u8).offset(8), 16);
-            let addr = format!(
-                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
-                ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3],
-                ip_bytes[4], ip_bytes[5], ip_bytes[6], ip_bytes[7],
-                ip_bytes[8], ip_bytes[9], ip_bytes[10], ip_bytes[11],
-                ip_bytes[12], ip_bytes[13], ip_bytes[14], ip_bytes[15]
-            );
-            (addr, NetworkProtocol::Tcp6)
-        } else {
-            ("unknown".to_string(), NetworkProtocol::Tcp)
+        let mut address = [0; 28];
+        copy_caller_bytes(name.cast(), &mut address[..2])?;
+        let required =
+            buffers::socket_address_length(u16::from_le_bytes([address[0], address[1]]))?;
+        if length < required {
+            return Err(BufferError::InvalidLength.into());
+        }
+        copy_caller_bytes(name.cast(), &mut address[..required])?;
+        let (remote_addr, port, ipv6) = buffers::socket_address(&address[..required])?;
+        let mut kind = 0_i32;
+        let mut kind_length = size_of::<i32>() as i32;
+        /* SAFETY: getsockopt validates the borrowed socket. Its output points
+        to an aligned local i32, with the exact capacity supplied separately. */
+        let result = unsafe {
+            getsockopt(
+                socket,
+                SOL_SOCKET,
+                SO_TYPE,
+                PSTR((&mut kind as *mut i32).cast()),
+                &mut kind_length,
+            )
         };
-
-        (addr, port, protocol)
-    } else {
-        ("unknown".to_string(), 0, NetworkProtocol::Tcp)
-    };
-
-    let operation = HookOperation::NetworkConnect {
-        remote_addr: addr,
-        port,
-        protocol,
-    };
-
-    // REQUEST APPROVAL
-    if !request_approval(operation) {
-        // DENIED - return error
-        return -1; // SOCKET_ERROR
+        if result == SOCKET_ERROR {
+            return Err(windows::core::Error::from_win32().into());
+        }
+        if kind_length != size_of::<i32>() as i32 {
+            return Err(BufferError::InvalidLength.into());
+        }
+        let protocol = match (kind, ipv6) {
+            (kind, false) if kind == SOCK_STREAM.0 => NetworkProtocol::Tcp,
+            (kind, true) if kind == SOCK_STREAM.0 => NetworkProtocol::Tcp6,
+            (kind, false) if kind == SOCK_DGRAM.0 => NetworkProtocol::Udp,
+            (kind, true) if kind == SOCK_DGRAM.0 => NetworkProtocol::Udp6,
+            _ => return Err(InspectionError::UnsupportedSocketType(kind)),
+        };
+        Ok(HookOperation::NetworkConnect {
+            remote_addr,
+            port,
+            protocol,
+        })
+    }) {
+        return denied();
     }
-
-    // ALLOWED - call original
-    if let Some(orig) = ORIG_CONNECT {
-        orig(s, name, namelen)
-    } else {
-        -1
+    /* SAFETY: Restore only this thread's socket error before calling the
+    process-lifetime connect trampoline with its unchanged borrowed buffer. */
+    unsafe {
+        WSASetLastError(saved_error.0);
+        original(socket, name, length)
     }
 }
 
-/// Install network operation hooks
-pub unsafe fn install_network_hooks() -> Result<(), String> {
-    // Load ws2_32.dll
-    let ws2_32 = windows::Win32::System::LibraryLoader::LoadLibraryA(
-        windows::core::PCSTR(c"ws2_32.dll".as_ptr() as *const u8),
-    )
-    .map_err(|e| format!("Failed to load ws2_32: {}", e))?;
+fn denied() -> i32 {
+    /* SAFETY: Winsock denials use its thread-local error slot, not errno. */
+    unsafe { WSASetLastError(WSAEACCES.0) };
+    SOCKET_ERROR
+}
 
-    // Hook connect
-    let connect_addr = windows::Win32::System::LibraryLoader::GetProcAddress(
-        ws2_32,
-        windows::core::PCSTR(c"connect".as_ptr() as *const u8),
-    )
-    .ok_or("connect not found")?;
-
-    let orig_connect = MinHook::create_hook(
-        connect_addr as *mut _,
-        hooked_connect as *mut _,
-    )
-    .map_err(|e| format!("Failed to hook connect: {:?}", e))?;
-
-    ORIG_CONNECT = Some(std::mem::transmute::<*mut std::ffi::c_void, FnConnect>(orig_connect));
-
-    MinHook::enable_hook(connect_addr as *mut _)
-        .map_err(|e| format!("Failed to enable connect hook: {:?}", e))?;
-
+pub fn install(installation: &mut Installation) -> Result<(), InitializationError> {
+    let module = installation.module(c"ws2_32.dll")?;
+    install_hook!(installation, module, c"connect", connect, CONNECT, Connect);
     Ok(())
 }

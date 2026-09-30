@@ -1,4 +1,7 @@
-// Behavioral patterns for threat detection
+//! Reference indicators for callers implementing additional analysis.
+//!
+//! These catalogs are not automatically evaluated by `BehaviorAnalyzer`.
+//! A matching string is an investigation lead, not proof of malicious behavior.
 
 pub struct ThreatPattern {
     pub name: &'static str,

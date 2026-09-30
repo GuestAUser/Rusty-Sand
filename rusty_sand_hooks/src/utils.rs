@@ -1,181 +1,183 @@
-//! Common utilities for hook implementations
-
+use crate::buffers::{self, BufferError};
+use crate::permissions;
+use std::ffi::c_void;
+use std::fmt;
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::{SetLastError, WIN32_ERROR};
+use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+use windows::Win32::System::Threading::GetCurrentProcess;
 
-/// Extract file path from PCWSTR (wide string pointer)
-///
-/// # Safety
-/// Caller must ensure the pointer is valid and null-terminated
-pub unsafe fn extract_path_from_pcwstr(pcwstr: PCWSTR) -> String {
-    if pcwstr.is_null() {
-        return String::new();
-    }
+/* The projected GetLastError converts to HRESULT and loses application-defined
+high bits. The raw ABI is needed to preserve the target's entire DWORD. */
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetLastError() -> WIN32_ERROR;
+}
 
-    match pcwstr.to_string() {
-        Ok(s) => s,
-        Err(_) => {
-            // Fallback: manual UTF-16 parsing
-            let mut len = 0;
-            while len < 32767 && *pcwstr.0.offset(len) != 0 {
-                len += 1;
+#[derive(Debug)]
+pub enum InspectionError {
+    Buffer(BufferError),
+    Windows(windows::core::Error),
+    InaccessibleMemory,
+    PartialRead { expected: usize, actual: usize },
+    RegistryStatus(i32),
+    UnsupportedSocketType(i32),
+}
+
+impl fmt::Display for InspectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Buffer(error) => error.fmt(f),
+            Self::Windows(error) => error.fmt(f),
+            Self::InaccessibleMemory => f.write_str("caller memory is not readable"),
+            Self::PartialRead { expected, actual } => {
+                write!(f, "caller memory read {actual} of {expected} bytes")
             }
-            if len == 0 {
-                return String::new();
+            Self::RegistryStatus(status) => {
+                write!(f, "NtQueryKey failed with NTSTATUS {status:#010x}")
             }
-            let slice = std::slice::from_raw_parts(pcwstr.0, len as usize);
-            String::from_utf16_lossy(slice)
+            Self::UnsupportedSocketType(kind) => write!(f, "unsupported socket type {kind}"),
         }
     }
 }
 
-/// Check if a file path appears suspicious
-///
-/// Note: Kept for future risk scoring system (Phase 3)
-#[allow(dead_code)]
-pub fn is_suspicious_path(path: &str) -> bool {
-    let path_lower = path.to_lowercase();
-
-    // System directories
-    if path_lower.contains("\\windows\\system32")
-        || path_lower.contains("\\windows\\syswow64") {
-        return true;
-    }
-
-    // Startup locations
-    if path_lower.contains("\\startup")
-        || path_lower.contains("\\programdata\\microsoft\\windows\\start menu\\programs\\startup") {
-        return true;
-    }
-
-    // Suspicious extensions in temp locations
-    if (path_lower.contains("\\temp\\") || path_lower.contains("\\appdata\\local\\temp"))
-        && (path_lower.ends_with(".exe")
-            || path_lower.ends_with(".dll")
-            || path_lower.ends_with(".bat")
-            || path_lower.ends_with(".vbs")
-            || path_lower.ends_with(".ps1")) {
-        return true;
-    }
-
-    false
-}
-
-/// Check if an IP address is private (RFC1918)
-///
-/// Note: Kept for future network analysis features (Phase 3)
-#[allow(dead_code)]
-pub fn is_private_ip(ip: &str) -> bool {
-    // Parse IP address
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() != 4 {
-        return false;
-    }
-
-    let octets: Vec<u8> = parts
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-
-    if octets.len() != 4 {
-        return false;
-    }
-
-    // Check private ranges
-    // 10.0.0.0/8
-    if octets[0] == 10 {
-        return true;
-    }
-
-    // 172.16.0.0/12
-    if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
-        return true;
-    }
-
-    // 192.168.0.0/16
-    if octets[0] == 192 && octets[1] == 168 {
-        return true;
-    }
-
-    // Loopback 127.0.0.0/8
-    if octets[0] == 127 {
-        return true;
-    }
-
-    false
-}
-
-/// Check if a port number is considered suspicious (commonly used by malware)
-///
-/// Note: Kept for future threat detection features (Phase 3)
-#[allow(dead_code)]
-pub fn is_suspicious_port(port: u16) -> bool {
-    matches!(port,
-        // Common C2 ports (including Metasploit default 4444)
-        4444 | 5555 | 6666 | 7777 | 8888 | 9999 |
-        // Common backdoor ports
-        31337 | 12345 | 54321 | 6667 | 6697 |
-        // RAT ports
-        1337 | 10000 | 20000 | 65535
-    )
-}
-
-/// Memory protection constants and helpers
-///
-/// Note: These are kept for future memory analysis features (Phase 3)
-#[allow(dead_code)]
-pub mod memory_protection {
-    pub const PAGE_EXECUTE: u32 = 0x10;
-    pub const PAGE_EXECUTE_READ: u32 = 0x20;
-    pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
-    pub const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
-
-    /// Check if memory protection includes execute permission
-    pub fn is_executable(protection: u32) -> bool {
-        protection & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) != 0
-    }
-
-    /// Check if memory protection allows write access
-    pub fn is_writable(protection: u32) -> bool {
-        protection & (0x04 | 0x08 | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) != 0
-    }
-
-    /// Check if memory protection is RWX (highly suspicious)
-    pub fn is_rwx(protection: u32) -> bool {
-        protection == PAGE_EXECUTE_READWRITE
+impl std::error::Error for InspectionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Buffer(error) => Some(error),
+            Self::Windows(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
-/// File access rights constants
-///
-/// Note: Some helpers kept for future file analysis features (Phase 3)
-#[allow(dead_code)]
-pub mod file_access {
-    pub const GENERIC_READ: u32 = 0x80000000;
-    pub const GENERIC_WRITE: u32 = 0x40000000;
-    pub const GENERIC_EXECUTE: u32 = 0x20000000;
-    pub const GENERIC_ALL: u32 = 0x10000000;
-
-    pub fn has_write_access(access: u32) -> bool {
-        access & (GENERIC_WRITE | GENERIC_ALL) != 0
-    }
-
-    pub fn has_read_access(access: u32) -> bool {
-        access & (GENERIC_READ | GENERIC_ALL) != 0
+impl From<BufferError> for InspectionError {
+    fn from(error: BufferError) -> Self {
+        Self::Buffer(error)
     }
 }
 
-/// File creation disposition constants
-///
-/// Note: Some constants kept for future file analysis features (Phase 3)
-#[allow(dead_code)]
-pub mod file_disposition {
-    pub const CREATE_NEW: u32 = 1;
-    pub const CREATE_ALWAYS: u32 = 2;
-    pub const OPEN_EXISTING: u32 = 3;
-    pub const OPEN_ALWAYS: u32 = 4;
-    pub const TRUNCATE_EXISTING: u32 = 5;
-
-    pub fn creates_new_file(disposition: u32) -> bool {
-        matches!(disposition, CREATE_NEW | CREATE_ALWAYS)
+impl From<windows::core::Error> for InspectionError {
+    fn from(error: windows::core::Error) -> Self {
+        Self::Windows(error)
     }
 }
+
+pub struct LastError(WIN32_ERROR);
+
+impl LastError {
+    pub fn save() -> Self {
+        /* SAFETY: GetLastError reads the calling thread's error slot. */
+        Self(unsafe { GetLastError() })
+    }
+}
+
+impl Drop for LastError {
+    fn drop(&mut self) {
+        /* SAFETY: Restoring the saved scalar affects only this thread. */
+        unsafe { SetLastError(self.0) };
+    }
+}
+
+pub fn deny<T>(result: T) -> T {
+    /* SAFETY: No pointers are involved; this is the Win32 denial contract. */
+    unsafe { SetLastError(windows::Win32::Foundation::ERROR_ACCESS_DENIED) };
+    result
+}
+
+pub fn copy_caller_bytes(
+    address: *const c_void,
+    destination: &mut [u8],
+) -> Result<(), InspectionError> {
+    buffers::validate_pointer_length(address as usize, destination.len())?;
+    if destination.is_empty() {
+        return Ok(());
+    }
+    let mut copied = 0;
+    /* SAFETY: ReadProcessMemory validates the source in the current process.
+    The destination is owned, initialized, and writable for exactly its
+    supplied length. No Rust reference is formed to caller-owned memory. */
+    unsafe {
+        ReadProcessMemory(
+            GetCurrentProcess(),
+            address,
+            destination.as_mut_ptr().cast(),
+            destination.len(),
+            Some(&mut copied),
+        )?;
+    }
+    if copied != destination.len() {
+        return Err(InspectionError::PartialRead {
+            expected: destination.len(),
+            actual: copied,
+        });
+    }
+    Ok(())
+}
+
+pub fn wide_string(pointer: PCWSTR) -> Result<String, InspectionError> {
+    const MAX_WCHARS: usize = 32_767;
+    if pointer.is_null() {
+        return Ok(String::new());
+    }
+    buffers::validate_wide_address(pointer.0 as usize)?;
+    let mut address = pointer.0 as usize;
+    let mut bytes = Vec::new();
+    while bytes.len() / 2 <= MAX_WCHARS {
+        let mut region = MEMORY_BASIC_INFORMATION::default();
+        /* SAFETY: VirtualQuery probes an address without dereferencing it in
+        Rust, and writes only to the fully-sized local structure. */
+        let returned = unsafe {
+            VirtualQuery(
+                Some(address as *const c_void),
+                &mut region,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if returned != size_of::<MEMORY_BASIC_INFORMATION>()
+            || !permissions::readable_region(region.State.0, region.Protect.0)
+        {
+            return Err(InspectionError::InaccessibleMemory);
+        }
+        let end = (region.BaseAddress as usize)
+            .checked_add(region.RegionSize)
+            .ok_or(BufferError::InvalidLength)?;
+        let available = end.checked_sub(address).ok_or(BufferError::InvalidLength)?;
+        let length = available.min(256).min((MAX_WCHARS + 1) * 2 - bytes.len()) & !1;
+        if length == 0 {
+            return Err(BufferError::UnterminatedString.into());
+        }
+        let mut chunk = [0; 256];
+        copy_caller_bytes(address as *const c_void, &mut chunk[..length])?;
+        if buffers::append_wide_chunk(&mut bytes, &chunk[..length], MAX_WCHARS)? {
+            return Ok(buffers::utf16_from_bytes(&bytes)?);
+        }
+        address = address
+            .checked_add(length)
+            .ok_or(BufferError::InvalidLength)?;
+    }
+    Err(BufferError::UnterminatedString.into())
+}
+
+pub fn previous_protection(address: *const c_void) -> u32 {
+    let mut region = MEMORY_BASIC_INFORMATION::default();
+    /* SAFETY: The address is queried, not read, and the output is a local
+    structure. VirtualProtect's caller-owned output is never inspected. */
+    let returned = unsafe {
+        VirtualQuery(
+            Some(address),
+            &mut region,
+            size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    if returned == size_of::<MEMORY_BASIC_INFORMATION>() {
+        permissions::prior_protection(region.State.0, region.Protect.0)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/utils.rs"]
+mod tests;

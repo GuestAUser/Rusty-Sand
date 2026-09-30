@@ -1,164 +1,217 @@
-// Real registry monitoring using RegNotifyChangeKeyValue
-// This provides ACTUAL real-time registry change notifications
+/** Registry change notifications, not Event Tracing for Windows.
 
+The module and type names remain for source compatibility. Notifications
+identify a watched subtree, not an operation, value, or responsible process.
+*/
 use crate::report::{Event, EventType};
-use anyhow::Result;
-use log::{debug, info, warn};
+use anyhow::{bail, Context, Result};
+use log::warn;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::System::Registry::{
-    RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-    KEY_NOTIFY, REG_NOTIFY_CHANGE_NAME, REG_NOTIFY_CHANGE_LAST_SET,
-    REG_NOTIFY_CHANGE_ATTRIBUTES,
-};
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use tokio::sync::{mpsc, Mutex};
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE, KEY_NOTIFY, REG_NOTIFY_CHANGE_ATTRIBUTES, REG_NOTIFY_CHANGE_LAST_SET,
+    REG_NOTIFY_CHANGE_NAME,
+};
+use windows::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects};
 
 pub struct RealRegistryMonitor {
     events: Arc<Mutex<Vec<Event>>>,
-    monitored_keys: Vec<String>,
     shutdown: Arc<AtomicBool>,
 }
 
 impl RealRegistryMonitor {
     pub fn new(events: Arc<Mutex<Vec<Event>>>, shutdown: Arc<AtomicBool>) -> Self {
-        Self {
-            events,
-            monitored_keys: vec![
-                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run".to_string(),
-                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce".to_string(),
-                "Software\\Microsoft\\Windows\\CurrentVersion\\Run".to_string(), // HKCU
-                "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce".to_string(),
-                "SYSTEM\\CurrentControlSet\\Services".to_string(),
-            ],
-            shutdown,
-        }
+        Self { events, shutdown }
     }
 
     pub async fn monitor(self) -> Result<()> {
-        debug!("Starting REAL registry monitor with RegNotifyChangeKeyValue");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
+        let (sender, mut receiver) = mpsc::channel(256);
+        let shutdown = self.shutdown;
+        let worker = tokio::task::spawn_blocking(move || watch_keys(shutdown, cancelled, sender));
 
-        // Monitor both HKLM and HKCU Run keys
-        let tasks: Vec<_> = self.monitored_keys.iter().map(|key_path| {
-            let key_path = key_path.clone();
-            let events = self.events.clone();
-            let shutdown = self.shutdown.clone();
-
-            tokio::task::spawn_blocking(move || {
-                Self::monitor_key_blocking(&key_path, events, shutdown)
-            })
-        }).collect();
-
-        // Wait for all monitoring tasks or shutdown
-        loop {
-            if self.shutdown.load(Ordering::SeqCst) {
-                info!("🛑 Registry monitor shutting down...");
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        while let Some(event) = receiver.recv().await {
+            self.events.lock().await.push(event);
         }
 
-        // Abort all blocking tasks on shutdown
-        for task in tasks {
-            task.abort();
-        }
-
-        Ok(())
+        /* Join, rather than abort, the blocking worker. Dropping this future
+        also requests cancellation; the worker's OS wait is bounded. */
+        worker
+            .await
+            .context("registry notification worker failed")?
     }
+}
 
-    fn monitor_key_blocking(key_path: &str, events: Arc<Mutex<Vec<Event>>>, shutdown: Arc<AtomicBool>) {
-        unsafe {
-            // Try HKLM first
-            let key_wide: Vec<u16> = key_path.encode_utf16().chain(Some(0)).collect();
+struct CancelOnDrop(Arc<AtomicBool>);
 
-            let mut hkey = HKEY::default();
-            let result = RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(key_wide.as_ptr()),
-                0,
-                KEY_NOTIFY,
-                &mut hkey,
-            );
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
-            if result.is_err() {
-                // Try HKCU if HKLM fails
-                let result = RegOpenKeyExW(
-                    HKEY_CURRENT_USER,
-                    PCWSTR(key_wide.as_ptr()),
-                    0,
-                    KEY_NOTIFY,
-                    &mut hkey,
-                );
+struct OwnedKey(HKEY);
 
-                if result.is_err() {
-                    debug!("Could not open registry key for monitoring: {}", key_path);
-                    return;
-                }
-            }
+impl Drop for OwnedKey {
+    fn drop(&mut self) {
+        /* SAFETY: This is an owned RegOpenKeyExW result, never a predefined
+        hive. Closing the key cancels its pending notification registration. */
+        let status = unsafe { RegCloseKey(self.0) };
 
-            debug!("Monitoring registry key: {}", key_path);
-
-            // Create event object for interruptible waiting
-            let event_handle = match CreateEventW(None, true, false, None) {
-                Ok(h) => h,
-                Err(e) => {
-                    warn!("Failed to create event for registry monitoring: {:?}", e);
-                    return;
-                }
-            };
-
-            loop {
-                // Check shutdown signal
-                if shutdown.load(Ordering::SeqCst) {
-                    debug!("Registry monitor for {} received shutdown signal", key_path);
-                    break;
-                }
-
-                // Wait for changes with event object (non-blocking)
-                let wait_result = RegNotifyChangeKeyValue(
-                    hkey,
-                    true, // Watch subtree
-                    REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_ATTRIBUTES,
-                    event_handle,
-                    true, // Async notification
-                );
-
-                if wait_result.is_err() {
-                    debug!("RegNotifyChangeKeyValue failed for {}", key_path);
-                    break;
-                }
-
-                // Wait with timeout so we can check shutdown signal
-                let wait_timeout_result = WaitForSingleObject(event_handle, 500); // 500ms timeout
-
-                if wait_timeout_result == WAIT_OBJECT_0 { // Registry change detected
-                    let details = format!("Registry change detected: {}", key_path);
-                    warn!("🔧 {}", details);
-
-                    let event = Event {
-                        timestamp: chrono::Utc::now(),
-                        event_type: EventType::RegistryAccess,
-                        details,
-                    };
-
-                    // Log event
-                    let events_clone = events.clone();
-                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                        handle.block_on(async move {
-                            events_clone.lock().await.push(event);
-                        });
-                    }
-                } else if wait_timeout_result == WAIT_TIMEOUT {
-                    // No changes detected, loop to check shutdown signal
-                    continue;
-                } else {
-                    // Error occurred
-                    debug!("WaitForSingleObject failed for {}", key_path);
-                    break;
-                }
-            }
+        if let Err(error) = status {
+            warn!("Closing registry notification key failed: {error}");
         }
     }
 }
+
+struct OwnedEvent(HANDLE);
+
+impl Drop for OwnedEvent {
+    fn drop(&mut self) {
+        /* SAFETY: The event is exclusively owned and its registry key has
+        already been closed before this field is dropped. */
+        if let Err(error) = unsafe { CloseHandle(self.0) } {
+            warn!("Closing registry notification event failed: {error}");
+        }
+    }
+}
+
+struct KeyWatch {
+    /* Field drop order cancels the notification before closing its event. */
+    key: OwnedKey,
+    event: OwnedEvent,
+    name: String,
+}
+
+impl KeyWatch {
+    fn open(hive: HKEY, hive_name: &str, path: &str) -> Result<Self> {
+        let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        let mut key = HKEY::default();
+
+        /* SAFETY: The UTF-16 path is NUL-terminated and live for the call.
+        `key` is writable output; success transfers one handle to OwnedKey. */
+        unsafe { RegOpenKeyExW(hive, PCWSTR(wide.as_ptr()), 0, KEY_NOTIFY, &mut key) }
+            .ok()
+            .with_context(|| format!("open {hive_name}\\{path}"))?;
+        let key = OwnedKey(key);
+
+        /* SAFETY: No borrowed security descriptor or name is supplied.
+        CreateEventW transfers one auto-reset event handle to this owner. */
+        let event = OwnedEvent(unsafe { CreateEventW(None, false, false, None) }?);
+        let watch = Self {
+            key,
+            event,
+            name: format!("{hive_name}\\{path}"),
+        };
+        watch.arm()?;
+        Ok(watch)
+    }
+
+    fn arm(&self) -> Result<()> {
+        /* SAFETY: Both handles stay owned on this blocking thread until the
+        key closes. Only one registration is outstanding per key; the
+        auto-reset event is consumed before registering the next one. */
+        unsafe {
+            RegNotifyChangeKeyValue(
+                self.key.0,
+                true,
+                REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_ATTRIBUTES,
+                self.event.0,
+                true,
+            )
+        }
+        .ok()
+        .with_context(|| format!("register notification for {}", self.name))
+    }
+}
+
+fn watch_keys(
+    shutdown: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    sender: mpsc::Sender<Event>,
+) -> Result<()> {
+    let stopping = || shutdown.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire);
+
+    if stopping() {
+        return Ok(());
+    }
+
+    let mut watches = Vec::new();
+    let run = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    let run_once = "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce";
+    let services = "SYSTEM\\CurrentControlSet\\Services";
+
+    for (hive, name, path) in [
+        (HKEY_LOCAL_MACHINE, "HKLM", run),
+        (HKEY_LOCAL_MACHINE, "HKLM", run_once),
+        (HKEY_CURRENT_USER, "HKCU", run),
+        (HKEY_CURRENT_USER, "HKCU", run_once),
+        (HKEY_LOCAL_MACHINE, "HKLM", services),
+    ] {
+        match KeyWatch::open(hive, name, path) {
+            Ok(watch) => watches.push(watch),
+            Err(error) => warn!("Registry observation unavailable: {error:#}"),
+        }
+    }
+
+    if watches.is_empty() {
+        bail!("no configured registry keys could be watched");
+    }
+
+    let handles: Vec<_> = watches.iter().map(|watch| watch.event.0).collect();
+
+    while !stopping() {
+        /* SAFETY: All event handles are live and unique; the slice has at
+        most five entries. This bounded wait runs only on a blocking worker. */
+        let result = unsafe { WaitForMultipleObjects(&handles, false, 100) };
+
+        if result == WAIT_TIMEOUT {
+            /* A timeout leaves the existing registration pending. Rearming
+            here would accumulate registrations without a matching change. */
+            continue;
+        }
+
+        if result == WAIT_FAILED {
+            return Err(std::io::Error::last_os_error()).context("wait for registry change");
+        }
+
+        let index = result.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+        let Some(watch) = watches.get(index) else {
+            bail!("unexpected registry notification wait status: {}", result.0);
+        };
+
+        if stopping() {
+            break;
+        }
+
+        let event = Event {
+            timestamp: chrono::Utc::now(),
+            event_type: EventType::RegistryAccess,
+            details: format!(
+                "Observed registry subtree change (process unattributed; operation unspecified): {}",
+                watch.name
+            ),
+        };
+
+        match sender.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                bail!("registry notification queue overflowed; observations are incomplete");
+            }
+        }
+
+        watch.arm()?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/windows/monitor_etw_registry.rs"]
+mod tests;

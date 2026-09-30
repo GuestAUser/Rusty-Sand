@@ -1,4 +1,6 @@
-// Detection rules for various threat types
+//! Reference rule metadata for callers extending behavioral analysis.
+//!
+//! These definitions do not install detectors or establish detection coverage.
 
 use super::ThreatLevel;
 
@@ -9,7 +11,6 @@ pub struct DetectionRule {
     pub description: &'static str,
 }
 
-// Ransomware detection rules
 pub const RULE_MASS_FILE_ENCRYPTION: DetectionRule = DetectionRule {
     id: "R001",
     name: "Mass File Encryption",
@@ -24,7 +25,6 @@ pub const RULE_RANSOM_NOTE: DetectionRule = DetectionRule {
     description: "Creation of files typically associated with ransom demands",
 };
 
-// Persistence rules
 pub const RULE_REGISTRY_PERSISTENCE: DetectionRule = DetectionRule {
     id: "P001",
     name: "Registry Persistence",
@@ -32,7 +32,6 @@ pub const RULE_REGISTRY_PERSISTENCE: DetectionRule = DetectionRule {
     description: "Modification of registry keys for persistence",
 };
 
-// Evasion rules
 pub const RULE_UAC_BYPASS: DetectionRule = DetectionRule {
     id: "E001",
     name: "UAC Bypass Attempt",
@@ -47,7 +46,6 @@ pub const RULE_SECURITY_TAMPERING: DetectionRule = DetectionRule {
     description: "Attempt to disable or modify security software",
 };
 
-// Network rules
 pub const RULE_C2_CONNECTION: DetectionRule = DetectionRule {
     id: "N001",
     name: "C2 Connection",

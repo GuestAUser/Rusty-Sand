@@ -1,54 +1,32 @@
 use crate::config::SandboxConfig;
-use crate::report::{Event, EventType};
+use crate::report::Event;
 use anyhow::Result;
-use log::debug;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/** Compatibility entry point for registry change notifications.
+
+Start this monitor or `RealRegistryMonitor`, not both. The latter additionally
+accepts the runtime owner's shutdown flag. Dropping either monitor future
+cancels its notification worker; configuration never fabricates a denial.
+*/
 pub struct RegistryMonitor {
-    config: SandboxConfig,
     events: Arc<Mutex<Vec<Event>>>,
 }
 
 impl RegistryMonitor {
-    pub fn new(config: SandboxConfig, events: Arc<Mutex<Vec<Event>>>) -> Result<Self> {
-        Ok(Self { config, events })
+    pub fn new(_config: SandboxConfig, events: Arc<Mutex<Vec<Event>>>) -> Result<Self> {
+        Ok(Self { events })
     }
 
     pub async fn start(self) -> Result<()> {
-        debug!("Starting registry monitor");
-
-        if !self.config.allow_registry {
-            self.log_event(
-                EventType::RegistryBlocked,
-                "Registry access disabled".to_string(),
-            )
-            .await;
-            return Ok(());
-        }
-
-        // Note: Full registry monitoring requires a kernel driver or API hooking
-        // This is a placeholder for basic monitoring [!]
-        // Dev note: We could consider using Windows ETW (Event Tracing for Windows)
-
-        // NOTE: This monitor is mostly a placeholder - real registry monitoring
-        // happens via ETW in etw_registry.rs
-
-        // Just exit immediately - no need to keep a dummy loop running
-        Ok(())
-    }
-
-    async fn log_event(&self, event_type: EventType, details: String) {
-        let event = Event {
-            timestamp: chrono::Utc::now(),
-            event_type,
-            details,
-        };
-
-        if self.config.verbose {
-            debug!("[REGISTRY] {:?}: {}", event.event_type, event.details);
-        }
-
-        self.events.lock().await.push(event);
+        super::etw_registry::RealRegistryMonitor::new(self.events, Arc::new(AtomicBool::new(false)))
+            .monitor()
+            .await
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/windows/monitor_registry.rs"]
+mod tests;

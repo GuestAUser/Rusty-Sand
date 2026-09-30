@@ -1,109 +1,138 @@
-//! IPC client for communication with main process
-
-use crate::types::{HookRequest, HookResponse};
+use crate::framing::{self, FrameError};
+use crate::types::{pipe_name, HookReady, HookRequest, HookResponse, MAX_MESSAGE_SIZE};
+use serde::Serialize;
+use std::fmt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{ERROR_MORE_DATA, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
-    OPEN_EXISTING,
+    CreateFileW, ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING,
 };
+use windows::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_READMODE_MESSAGE};
 
-const PIPE_NAME: &str = r"\\.\pipe\rusty_sand_hooks";
-const BUFFER_SIZE: usize = 8192;
+#[derive(Debug)]
+pub enum TransportError {
+    Windows {
+        operation: &'static str,
+        source: windows::core::Error,
+    },
+    Encode(serde_json::Error),
+    Decode(serde_json::Error),
+    Frame(FrameError),
+}
 
-/// IPC client for communicating with the main Rusty Sand process
+impl fmt::Display for TransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Windows { operation, source } => write!(f, "{operation}: {source}"),
+            Self::Encode(error) => write!(f, "encode hook message: {error}"),
+            Self::Decode(error) => write!(f, "decode hook response: {error}"),
+            Self::Frame(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Windows { source, .. } => Some(source),
+            Self::Encode(source) | Self::Decode(source) => Some(source),
+            Self::Frame(source) => Some(source),
+        }
+    }
+}
+
+impl From<FrameError> for TransportError {
+    fn from(error: FrameError) -> Self {
+        Self::Frame(error)
+    }
+}
+
 pub struct HookIpcClient {
-    pipe_handle: HANDLE,
+    pipe: OwnedHandle,
 }
 
 impl HookIpcClient {
-    /// Connect to the IPC server (main process)
-    ///
-    /// # Returns
-    /// Result with HookIpcClient on success, or error message on failure
-    pub fn connect() -> Result<Self, String> {
-        let pipe_name_wide: Vec<u16> = PIPE_NAME.encode_utf16().chain(Some(0)).collect();
-
-        let pipe_handle = unsafe {
+    pub fn connect(pid: u32) -> Result<Self, TransportError> {
+        let name: Vec<u16> = pipe_name(pid).encode_utf16().chain(Some(0)).collect();
+        /* SAFETY: The local pipe name is owned and terminated. CreateFileW
+        returns a newly owned synchronous handle, never a borrowed handle. */
+        let handle = unsafe {
             CreateFileW(
-                PCWSTR(pipe_name_wide.as_ptr()),
-                0xC0000000, // GENERIC_READ | GENERIC_WRITE
+                PCWSTR(name.as_ptr()),
+                0xC000_0000,
                 FILE_SHARE_MODE(0),
                 None,
                 OPEN_EXISTING,
                 FILE_FLAGS_AND_ATTRIBUTES(0),
                 HANDLE(0),
             )
-        };
-
-        if pipe_handle.is_err() || pipe_handle.as_ref().unwrap().is_invalid() {
-            return Err("Failed to connect to IPC pipe".to_string());
         }
-
-        Ok(Self {
-            pipe_handle: pipe_handle.unwrap(),
-        })
+        .map_err(|source| TransportError::Windows {
+            operation: "open hook pipe",
+            source,
+        })?;
+        /* SAFETY: A successful CreateFileW returns a valid uniquely owned
+        handle; OwnedHandle closes it on every subsequent error path. */
+        let pipe = unsafe { OwnedHandle::from_raw_handle(handle.0 as *mut _) };
+        /* SAFETY: The live handle belongs to this client. Message read mode
+        prevents a partial frame from being accepted as a complete reply. */
+        unsafe { SetNamedPipeHandleState(handle, Some(&PIPE_READMODE_MESSAGE), None, None) }
+            .map_err(|source| TransportError::Windows {
+                operation: "set pipe message mode",
+                source,
+            })?;
+        Ok(Self { pipe })
     }
 
-    /// Request approval for an operation
-    ///
-    /// # Arguments
-    /// * `request` - The hook request containing operation details
-    ///
-    /// # Returns
-    /// Result with HookResponse indicating approval/denial, or error message
-    pub fn request_approval(&self, request: &HookRequest) -> Result<HookResponse, String> {
-        // Serialize request to JSON
-        let json = serde_json::to_string(request).map_err(|e| format!("JSON serialize error: {}", e))?;
-        let json_bytes = json.as_bytes();
+    pub fn send_ready(&mut self, ready: &HookReady) -> Result<(), TransportError> {
+        self.send(ready)
+    }
 
-        // Validate size
-        if json_bytes.len() > BUFFER_SIZE {
-            return Err(format!("Request too large: {} bytes (max {})", json_bytes.len(), BUFFER_SIZE));
+    pub fn request_approval(
+        &mut self,
+        request: &HookRequest,
+    ) -> Result<HookResponse, TransportError> {
+        self.send(request)?;
+        let mut buffer = [0; MAX_MESSAGE_SIZE];
+        let mut read = 0;
+        /* SAFETY: The synchronous read borrows only this initialized local
+        buffer. &mut self and the approval mutex serialize whole exchanges. */
+        let result = unsafe { ReadFile(self.handle(), Some(&mut buffer), Some(&mut read), None) };
+        if let Err(source) = result {
+            return Err(
+                if source.code() == windows::core::HRESULT::from_win32(ERROR_MORE_DATA.0) {
+                    FrameError::TooLarge.into()
+                } else {
+                    TransportError::Windows {
+                        operation: "read hook response",
+                        source,
+                    }
+                },
+            );
         }
+        /* Validate even unknown JSON fields as UTF-8 rather than accepting
+        or replacing malformed bytes during policy parsing. */
+        let text = framing::message_text(&buffer[..read as usize])?;
+        serde_json::from_str(text).map_err(TransportError::Decode)
+    }
 
-        // Write request to pipe
-        let mut bytes_written = 0u32;
-        unsafe {
-            WriteFile(
-                self.pipe_handle,
-                Some(json_bytes),
-                Some(&mut bytes_written),
-                None,
-            )
-            .map_err(|e| format!("IPC write failed: {}", e))?;
-        }
+    fn send(&mut self, message: &impl Serialize) -> Result<(), TransportError> {
+        let bytes = serde_json::to_vec(message).map_err(TransportError::Encode)?;
+        framing::check_size(bytes.len())?;
+        let mut written = 0;
+        /* SAFETY: The synchronous write borrows an owned buffer for its exact
+        length and a local count. The pipe handle remains owned by self. */
+        unsafe { WriteFile(self.handle(), Some(&bytes), Some(&mut written), None) }.map_err(
+            |source| TransportError::Windows {
+                operation: "write hook message",
+                source,
+            },
+        )?;
+        framing::check_write(bytes.len(), written).map_err(TransportError::Frame)
+    }
 
-        // Read response from pipe
-        let mut buffer = [0u8; BUFFER_SIZE];
-        let mut bytes_read = 0u32;
-        unsafe {
-            ReadFile(
-                self.pipe_handle,
-                Some(&mut buffer[..]),
-                Some(&mut bytes_read),
-                None,
-            )
-            .map_err(|e| format!("IPC read failed: {}", e))?;
-        }
-
-        // Deserialize response from JSON
-        let json_str = std::str::from_utf8(&buffer[..bytes_read as usize])
-            .map_err(|e| format!("UTF-8 decode failed: {}", e))?;
-
-        serde_json::from_str(json_str).map_err(|e| format!("JSON parse failed: {}", e))
+    fn handle(&self) -> HANDLE {
+        HANDLE(self.pipe.as_raw_handle() as isize)
     }
 }
-
-impl Drop for HookIpcClient {
-    fn drop(&mut self) {
-        // Close pipe handle when client is dropped
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(self.pipe_handle);
-        }
-    }
-}
-
-// Thread-safe for passing between threads (if needed)
-unsafe impl Send for HookIpcClient {}
-unsafe impl Sync for HookIpcClient {}

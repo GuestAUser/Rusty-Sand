@@ -1,158 +1,87 @@
-//! Example: Advanced monitoring and analysis
+//! Observe a benign PowerShell process listing and inspect recorded events.
 //!
-//! This example demonstrates advanced features like:
-//! - Custom security policies
-//! - Event filtering and analysis
-//! - Threat detection patterns
-//!
-//! Run with: cargo run --example advanced_monitoring
+//! Run manually on Windows with: cargo run --example advanced_monitoring
+//! Event counts describe observations, not complete system activity or proof
+//! that an operation was prevented. Run untrusted programs in a disposable VM.
 
-use rusty_sand::{execute_sandboxed, SandboxConfig};
-use std::path::PathBuf;
-use std::time::Duration;
+#[cfg(not(windows))]
+fn main() -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "This example requires Windows",
+    )
+    .into())
+}
 
+#[cfg(windows)]
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use rusty_sand::report::EventType;
+    use rusty_sand::{execute_sandboxed, SandboxConfig};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
-        .init();
+        .try_init()
+        .context("Failed to initialize logging")?;
 
-    println!("🔬 Rusty Sand - Advanced Monitoring Example\n");
-
-    // Strict security configuration
     let mut config = SandboxConfig::new()
         .with_internet(false)
         .with_timeout(Duration::from_secs(60))
-        .with_working_dir(PathBuf::from("C:\\Temp"))
         .with_memory_limit(256)
         .with_verbose(true)
         .with_output_dir(PathBuf::from("./advanced_output"));
 
-    // Additional configuration
-    config.allow_dns = false;
-    config.allow_registry = true; // Monitor but allow
-    config.allowed_file_patterns = vec![
-        "*.txt".to_string(),
-        "*.log".to_string(),
-    ];
-    config.max_cpu_time = 30;
-    config.log_network_packets = true;
+    /*
+     * This demonstration uses observational monitors without DLL hooks. Turning
+     * off approval also avoids implying that observations can stop an action.
+     */
     config.enable_api_hooks = false;
+    config.interactive_mode = false;
+    config.max_cpu_time = 30;
 
-    println!("⚙️  Security Configuration:");
-    println!("  Internet: BLOCKED");
-    println!("  Memory Limit: {} MB", config.max_memory_mb);
-    println!("  CPU Limit: {} seconds", config.max_cpu_time);
-    println!("  Network Logging: {}", config.log_network_packets);
-    println!();
-
-    // Example: Analyze a PowerShell script
-    let executable = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    let executable = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
     let args = vec![
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
         "-Command".to_string(),
         "Get-Process | Select-Object -First 5".to_string(),
     ];
 
-    println!("🚀 Executing: {} with args", executable);
-    println!();
+    println!("Running a PowerShell process listing with observational monitoring.");
+    println!("No API hooks are installed; the network policy is not containment.");
 
     let report = execute_sandboxed(executable, &args, config).await?;
-
-    // Advanced analysis
-    println!("\n🔍 Advanced Analysis:");
-    println!("═══════════════════════════════════════");
-
-    // Check for suspicious patterns
-    let suspicious_keywords = vec![
-        "Download",
-        "Invoke-WebRequest",
-        "curl",
-        "wget",
-        "Start-Process",
-        "IEX",
-        "Invoke-Expression",
-    ];
-
-    let mut suspicious_count = 0;
-    for event in &report.events {
-        for keyword in &suspicious_keywords {
-            if event.details.contains(keyword) {
-                suspicious_count += 1;
-                println!("⚠️  Suspicious activity detected: {}", event.details);
-            }
-        }
-    }
-
-    if suspicious_count == 0 {
-        println!("✅ No suspicious patterns detected");
-    }
-
-    // Network analysis
     let network_events = report.get_network_events();
-    if !network_events.is_empty() {
-        println!("\n🌐 Network Activity Analysis:");
-        for event in network_events {
-            println!("  {:?}: {}", event.event_type, event.details);
-        }
-    } else {
-        println!("\n✅ No network activity detected");
+    println!("Network events recorded: {}", network_events.len());
+
+    for event in network_events {
+        println!("  {:?}: {}", event.event_type, event.details);
     }
 
-    // File system analysis
     let file_events = report.get_file_events();
-    println!("\n📁 File System Activity:");
-    println!("  Total file operations: {}", file_events.len());
+    let created = file_events
+        .iter()
+        .filter(|event| matches!(event.event_type, EventType::FileCreated))
+        .count();
+    let modified = file_events
+        .iter()
+        .filter(|event| matches!(event.event_type, EventType::FileModified))
+        .count();
+    let deleted = file_events
+        .iter()
+        .filter(|event| matches!(event.event_type, EventType::FileDeleted))
+        .count();
 
-    let mut created = 0;
-    let mut modified = 0;
-    let mut deleted = 0;
+    println!("File events recorded: {}", file_events.len());
+    println!("  Created: {created}");
+    println!("  Modified: {modified}");
+    println!("  Deleted: {deleted}");
+    println!("A missing event does not establish that no activity occurred.");
 
-    for event in file_events {
-        match event.event_type {
-            rusty_sand::report::EventType::FileCreated => created += 1,
-            rusty_sand::report::EventType::FileModified => modified += 1,
-            rusty_sand::report::EventType::FileDeleted => deleted += 1,
-            _ => {}
-        }
-    }
-
-    println!("  Created: {}", created);
-    println!("  Modified: {}", modified);
-    println!("  Deleted: {}", deleted);
-
-    // Generate risk score
-    let risk_score = calculate_risk_score(&report);
-    println!("\n📊 Risk Assessment:");
-    println!("  Risk Score: {} / 100", risk_score);
-    println!(
-        "  Risk Level: {}",
-        match risk_score {
-            0..=30 => "LOW ✅",
-            31..=60 => "MEDIUM ⚠️",
-            61..=80 => "HIGH 🔶",
-            _ => "CRITICAL 🚨",
-        }
-    );
-
-    // Save report
     report.print_summary();
 
     Ok(())
-}
-
-fn calculate_risk_score(report: &rusty_sand::SandboxReport) -> u32 {
-    let mut score = 0u32;
-
-    // Network attempts when blocked
-    for event in &report.events {
-        match event.event_type {
-            rusty_sand::report::EventType::NetworkBlocked => score += 15,
-            rusty_sand::report::EventType::ProcessCreated => score += 5,
-            rusty_sand::report::EventType::FileDeleted => score += 3,
-            _ => {}
-        }
-    }
-
-    // Cap at 100
-    score.min(100)
 }

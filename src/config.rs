@@ -2,6 +2,25 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigError {
+    UnsupportedFilePatterns,
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedFilePatterns => formatter.write_str(
+                "filesystem allowlist enforcement is unsupported; allowed_file_patterns must be empty",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// Requested execution policy. Individual monitors and hooks determine coverage;
+/// these settings do not establish an isolation boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Allow internet access (default: false)
@@ -19,7 +38,8 @@ pub struct SandboxConfig {
     /// Working directory for the sandboxed process
     pub working_dir: Option<PathBuf>,
 
-    /// File system access patterns to allow
+    /** Reserved for filesystem enforcement. Nonempty patterns are rejected
+    because directory observation cannot enforce a filesystem allowlist. */
     pub allowed_file_patterns: Vec<String>,
 
     /// Maximum memory usage in MB (0 = unlimited)
@@ -31,7 +51,8 @@ pub struct SandboxConfig {
     /// Enable verbose monitoring
     pub verbose: bool,
 
-    /// Enable network packet logging
+    /** Log observed network endpoints. The serialized field name is retained
+    for compatibility; this option does not capture packet payloads. */
     pub log_network_packets: bool,
 
     /// Enable API call hooking (advanced)
@@ -53,20 +74,20 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            allow_internet: false,  // SECURITY: Default deny
+            allow_internet: false,
             allow_dns: false,
-            allow_registry: true,   // Allow but monitor
-            timeout: Duration::from_secs(300), // 5 minutes
+            allow_registry: true,
+            timeout: Duration::from_secs(300),
             working_dir: None,
             allowed_file_patterns: vec![],
-            max_memory_mb: 1024,    // 1GB default limit
-            max_cpu_time: 300,      // 5 minutes
+            max_memory_mb: 1024,
+            max_cpu_time: 300,
             verbose: false,
             log_network_packets: false,
-            enable_api_hooks: true,  // Enable API hooking for TRUE prevention by default
-            interactive_mode: true,  // Enable interactive mode by default
-            enable_behavior_detection: true,  // Enable threat detection by default
-            auto_terminate_on_critical: false,  // Don't auto-terminate, ask user
+            enable_api_hooks: true,
+            interactive_mode: true,
+            enable_behavior_detection: true,
+            auto_terminate_on_critical: false,
             output_dir: PathBuf::from("./sandbox_output"),
         }
     }
@@ -77,11 +98,25 @@ impl SandboxConfig {
         Self::default()
     }
 
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.allowed_file_patterns.is_empty() {
+            return Err(ConfigError::UnsupportedFilePatterns);
+        }
+
+        Ok(())
+    }
+
     pub fn with_internet(mut self, enabled: bool) -> Self {
         self.allow_internet = enabled;
+
+        /*
+         * Enabling internet also enables name resolution. Disabling it preserves
+         * an independently configured DNS policy for compatibility.
+         */
         if enabled {
-            self.allow_dns = true; // DNS needed for internet
+            self.allow_dns = true;
         }
+
         self
     }
 
@@ -110,3 +145,7 @@ impl SandboxConfig {
         self
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/domain/config.rs"]
+mod tests;

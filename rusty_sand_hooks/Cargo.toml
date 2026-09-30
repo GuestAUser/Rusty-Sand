@@ -1,7 +1,9 @@
 [package]
 name = "rusty_sand_hooks"
 version = "0.2.5"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 authors = ["Security Research Team"]
 description = "API hooking DLL for Rusty Sand sandbox"
 
@@ -9,33 +11,23 @@ description = "API hooking DLL for Rusty Sand sandbox"
 crate-type = ["cdylib"]
 
 [dependencies]
-# API Hooking - MinHook for real inline hooks (stable Rust compatible)
+rusty_sand_protocol.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 minhook = "0.8"
-once_cell = "1.19"
 parking_lot = "0.12"
-
-# Serialization for IPC
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Windows API
-windows = { version = "0.52", features = [
+serde.workspace = true
+serde_json.workspace = true
+windows = { workspace = true, features = [
     "Win32_Foundation",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Pipes",
-    "Win32_Security",
-    "Win32_System_IO",
-    "Win32_System_Registry",
     "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
 ] }
-
-# Logging
-log = "0.4"
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1

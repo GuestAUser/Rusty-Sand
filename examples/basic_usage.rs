@@ -1,62 +1,60 @@
-//! Example: Basic usage of Rusty Sand library
+//! Launch Notepad and save the observed activity to example_report.json.
 //!
-//! This example demonstrates how to use Rusty Sand as a library
-//! to execute a program in a sandboxed environment and analyze the results.
-//!
-//! Run with: cargo run --example basic_usage
+//! Run manually on Windows with: cargo run --example basic_usage
+//! Monitoring is incomplete and is not a security boundary. Use a disposable VM
+//! when adapting this example to untrusted programs.
 
-use rusty_sand::{execute_sandboxed, SandboxConfig};
-use std::time::Duration;
+#[cfg(not(windows))]
+fn main() -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "This example requires Windows",
+    )
+    .into())
+}
 
+#[cfg(windows)]
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    env_logger::init();
+async fn main() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use rusty_sand::{execute_sandboxed, SandboxConfig};
+    use std::path::Path;
+    use std::time::Duration;
 
-    println!("🏖️  Rusty Sand - Basic Usage Example\n");
+    env_logger::try_init().context("Failed to initialize logging")?;
 
-    // Configure the sandbox
     let config = SandboxConfig::new()
-        .with_internet(false) // No internet access (secure default)
+        .with_internet(false)
         .with_timeout(Duration::from_secs(30))
-        .with_memory_limit(512) // 512 MB memory limit
+        .with_memory_limit(512)
         .with_verbose(true);
 
-    println!("Executing notepad.exe in sandbox...\n");
+    println!("Launching Notepad. Close its window to finish the demonstration.");
+    println!("The network policy does not guarantee network isolation.");
 
-    // Execute notepad in the sandbox
-    let report = execute_sandboxed(
-        "C:\\Windows\\System32\\notepad.exe",
-        &[],
-        config,
-    )
-    .await?;
+    let report = execute_sandboxed(r"C:\Windows\System32\notepad.exe", &[], config).await?;
 
-    // Analyze the results
-    println!("\n📊 Analysis Results:");
-    println!("═══════════════════════════════════════");
-    println!("Total events captured: {}", report.events.len());
+    println!("Events recorded: {}", report.events.len());
     println!("Duration: {} seconds", report.duration_seconds);
     println!("Exit code: {}", report.exit_code);
 
-    // Get specific event types
     let file_events = report.get_file_events();
-    let network_events = report.get_network_events();
+    println!("File events: {}", file_events.len());
 
-    println!("\n📁 File Operations: {}", file_events.len());
     for event in file_events.iter().take(5) {
-        println!("  - {:?}: {}", event.event_type, event.details);
+        println!("  {:?}: {}", event.event_type, event.details);
     }
 
-    println!("\n🌐 Network Activity: {}", network_events.len());
+    let network_events = report.get_network_events();
+    println!("Network events: {}", network_events.len());
+
     for event in network_events {
-        println!("  - {:?}: {}", event.event_type, event.details);
+        println!("  {:?}: {}", event.event_type, event.details);
     }
 
-    // Save detailed JSON report
-    let json_path = std::path::Path::new("./example_report.json");
+    let json_path = Path::new("./example_report.json");
     report.save_json(json_path)?;
-    println!("\n✅ Full report saved to: {}", json_path.display());
+    println!("Report saved to: {}", json_path.display());
 
     Ok(())
 }

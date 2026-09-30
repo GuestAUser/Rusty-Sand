@@ -1,142 +1,66 @@
-//! Folder/directory operation hooks (CreateDirectoryW, RemoveDirectoryW)
-
-use crate::hooks::file_hooks::{IPC_CLIENT};
-use crate::types::{HookOperation, HookRequest};
-use crate::utils;
-use minhook::MinHook;
+use crate::approval::approve;
+use crate::installation::{InitializationError, Installation};
+use crate::types::HookOperation;
+use crate::utils::{deny, wide_string};
+use std::ffi::c_void;
+use std::sync::OnceLock;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::BOOL;
-use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
-// Original function pointers
-static mut ORIG_CREATE_DIRECTORY_W: Option<FnCreateDirectoryW> = None;
-static mut ORIG_REMOVE_DIRECTORY_W: Option<FnRemoveDirectoryW> = None;
+type CreateDirectory = unsafe extern "system" fn(PCWSTR, *const c_void) -> BOOL;
+type RemoveDirectory = unsafe extern "system" fn(PCWSTR) -> BOOL;
+static CREATE_DIRECTORY: OnceLock<CreateDirectory> = OnceLock::new();
+static REMOVE_DIRECTORY: OnceLock<RemoveDirectory> = OnceLock::new();
 
-// Function type definitions
-type FnCreateDirectoryW = unsafe extern "system" fn(PCWSTR, *const std::ffi::c_void) -> BOOL;
-type FnRemoveDirectoryW = unsafe extern "system" fn(PCWSTR) -> BOOL;
-
-/// Request approval from main process via IPC
-fn request_approval(operation: HookOperation) -> bool {
-    let client_guard = IPC_CLIENT.lock();
-
-    if let Some(client) = client_guard.as_ref() {
-        let request = HookRequest {
-            operation,
-            pid: unsafe { GetCurrentProcessId() },
-            tid: unsafe { GetCurrentThreadId() },
-        };
-
-        match client.request_approval(&request) {
-            Ok(response) => response.allowed,
-            Err(_) => false,
-        }
-    } else {
-        false
-    }
-}
-
-/// Hooked CreateDirectoryW - intercepts folder creation BEFORE execution
-unsafe extern "system" fn hooked_create_directory_w(
-    lppathname: PCWSTR,
-    lpsecurityattributes: *const std::ffi::c_void,
-) -> BOOL {
-    let folder_path = utils::extract_path_from_pcwstr(lppathname);
-
-    if folder_path.is_empty() {
-        if let Some(orig) = ORIG_CREATE_DIRECTORY_W {
-            return orig(lppathname, lpsecurityattributes);
-        }
-        return BOOL(0);
-    }
-
-    let operation = HookOperation::FolderCreate {
-        path: folder_path,
+unsafe extern "system" fn create_directory(path: PCWSTR, security: *const c_void) -> BOOL {
+    let Some(original) = CREATE_DIRECTORY.get() else {
+        return deny(BOOL(0));
     };
-
-    // REQUEST APPROVAL
-    if !request_approval(operation) {
-        return BOOL(0);
+    if !approve(|| {
+        Ok(HookOperation::FolderCreate {
+            path: wide_string(path)?,
+        })
+    }) {
+        return deny(BOOL(0));
     }
-
-    // ALLOWED - call original
-    if let Some(orig) = ORIG_CREATE_DIRECTORY_W {
-        orig(lppathname, lpsecurityattributes)
-    } else {
-        BOOL(0)
-    }
+    /* SAFETY: The immutable trampoline has CreateDirectoryW's ABI and forwards
+    borrowed caller pointers unchanged, outside all helper scopes. */
+    unsafe { original(path, security) }
 }
 
-/// Hooked RemoveDirectoryW - intercepts folder deletion BEFORE execution
-unsafe extern "system" fn hooked_remove_directory_w(lppathname: PCWSTR) -> BOOL {
-    let folder_path = utils::extract_path_from_pcwstr(lppathname);
-
-    if folder_path.is_empty() {
-        if let Some(orig) = ORIG_REMOVE_DIRECTORY_W {
-            return orig(lppathname);
-        }
-        return BOOL(0);
-    }
-
-    let operation = HookOperation::FolderDelete {
-        path: folder_path,
+unsafe extern "system" fn remove_directory(path: PCWSTR) -> BOOL {
+    let Some(original) = REMOVE_DIRECTORY.get() else {
+        return deny(BOOL(0));
     };
-
-    // REQUEST APPROVAL
-    if !request_approval(operation) {
-        return BOOL(0);
+    if !approve(|| {
+        Ok(HookOperation::FolderDelete {
+            path: wide_string(path)?,
+        })
+    }) {
+        return deny(BOOL(0));
     }
-
-    // ALLOWED - call original
-    if let Some(orig) = ORIG_REMOVE_DIRECTORY_W {
-        orig(lppathname)
-    } else {
-        BOOL(0)
-    }
+    /* SAFETY: The process-lifetime trampoline matches RemoveDirectoryW's ABI.
+    The caller retains ownership of the unchanged path pointer. */
+    unsafe { original(path) }
 }
 
-/// Install folder operation hooks
-pub unsafe fn install_folder_hooks() -> Result<(), String> {
-    let kernel32 = windows::Win32::System::LibraryLoader::GetModuleHandleA(
-        windows::core::PCSTR(c"kernel32.dll".as_ptr() as *const u8),
-    )
-    .map_err(|e| format!("Failed to get kernel32: {}", e))?;
-
-    // Hook CreateDirectoryW
-    let createdirectoryw_addr = windows::Win32::System::LibraryLoader::GetProcAddress(
-        kernel32,
-        windows::core::PCSTR(c"CreateDirectoryW".as_ptr() as *const u8),
-    )
-    .ok_or("CreateDirectoryW not found")?;
-
-    let orig_createdirectoryw = MinHook::create_hook(
-        createdirectoryw_addr as *mut _,
-        hooked_create_directory_w as *mut _,
-    )
-    .map_err(|e| format!("Failed to hook CreateDirectoryW: {:?}", e))?;
-
-    ORIG_CREATE_DIRECTORY_W = Some(std::mem::transmute::<*mut std::ffi::c_void, FnCreateDirectoryW>(orig_createdirectoryw));
-
-    MinHook::enable_hook(createdirectoryw_addr as *mut _)
-        .map_err(|e| format!("Failed to enable CreateDirectoryW hook: {:?}", e))?;
-
-    // Hook RemoveDirectoryW
-    let removedirectoryw_addr = windows::Win32::System::LibraryLoader::GetProcAddress(
-        kernel32,
-        windows::core::PCSTR(c"RemoveDirectoryW".as_ptr() as *const u8),
-    )
-    .ok_or("RemoveDirectoryW not found")?;
-
-    let orig_removedirectoryw = MinHook::create_hook(
-        removedirectoryw_addr as *mut _,
-        hooked_remove_directory_w as *mut _,
-    )
-    .map_err(|e| format!("Failed to hook RemoveDirectoryW: {:?}", e))?;
-
-    ORIG_REMOVE_DIRECTORY_W = Some(std::mem::transmute::<*mut std::ffi::c_void, FnRemoveDirectoryW>(orig_removedirectoryw));
-
-    MinHook::enable_hook(removedirectoryw_addr as *mut _)
-        .map_err(|e| format!("Failed to enable RemoveDirectoryW hook: {:?}", e))?;
-
+pub fn install(installation: &mut Installation) -> Result<(), InitializationError> {
+    let module = installation.module(c"kernel32.dll")?;
+    install_hook!(
+        installation,
+        module,
+        c"CreateDirectoryW",
+        create_directory,
+        CREATE_DIRECTORY,
+        CreateDirectory
+    );
+    install_hook!(
+        installation,
+        module,
+        c"RemoveDirectoryW",
+        remove_directory,
+        REMOVE_DIRECTORY,
+        RemoveDirectory
+    );
     Ok(())
 }
