@@ -1,678 +1,117 @@
-# 🏖️ Rusty Sand
+# Rusty Sand
 
-[![Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
-[![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+Rusty Sand is a Windows executable-analysis tool written in Rust. It records
+process activity, scores intercepted operations, supports interactive approval,
+and produces console or JSON reports.
 
-**Advanced Windows Sandbox with Real-Time Host Intrusion Prevention System (HIPS)**
+It is not a security boundary. User-mode hooks and Windows Job Objects do not
+provide complete filesystem, network, or privilege isolation. Analyze untrusted
+programs in a disposable Windows VM.
 
-Rusty Sand is a executable sandbox for Windows security research that i've made providing **real-time API interception**, behavioral threat detection, and interactive control over every operation a program performs. Unlike passive sandboxes that monitor after-the-fact, Rusty Sand implements a true HIPS that **intercepts operations BEFORE execution** using DLL injection and API hooking.
+## Build
 
-⚠️ **For defensive security research only.** Run on isolated VMs, never on production systems.
+Use a native AMD64 Windows Rust toolchain with its C/C++ build tools. Hook
+injection does not support WOW64 or ARM emulation. The repository pins Rust in
+`rust-toolchain.toml` and checks in `Cargo.lock`.
 
----
-
-## Showcase
-
-[![Watch the video](logo.png)](https://www.youtube.com/watch?v=D4I567QeiMk)
-
-## 🌟 Key Features
-
-### 🛡️ Real-Time API Interception (HIPS)
-- **DLL Injection**: Injects hook DLL into target process using `CreateRemoteThread`
-- **MinHook Integration**: Inline API hooking for Windows functions
-- **Pre-Execution Blocking**: Operations intercepted BEFORE they execute
-- **Named Pipe IPC**: Secure communication between main process and hook DLL
-- **Modular Architecture**: Hooks organized by category (file, folder, network, registry, process, memory) ✨ **NEW**
-- **Hooked APIs** (17 critical Windows functions - **+112% coverage**):
-
-  **File Operations (2 hooks)**:
-  - `CreateFileW` - File creation and modification
-  - `DeleteFileW` - File deletion
-
-  **Folder Operations (2 hooks)**:
-  - `CreateDirectoryW` - Folder creation
-  - `RemoveDirectoryW` - Folder deletion
-
-  **Network Operations (1 hook)**:
-  - `connect` - Network connections (TCP/UDP)
-
-  **Registry Operations (4 hooks)**:
-  - `RegSetValueExW` - Registry value writes
-  - `RegDeleteKeyW` - Registry key deletion
-  - `RegQueryValueExW` - Registry value reads
-  - `RegOpenKeyExW` - Registry key opens
-
-  **Process/Thread Operations (3 hooks)** ✨ **NEW**:
-  - `CreateProcessW` - Child process creation
-  - `CreateThread` - Thread creation
-  - `CreateRemoteThread` - Remote thread injection (CRITICAL for detecting process injection)
-
-  **Memory/DLL Operations (5 hooks)** ✨ **NEW**:
-  - `VirtualAlloc` - Memory allocation (detects RWX allocations)
-  - `VirtualProtect` - Memory protection changes (detects DEP bypasses)
-  - `WriteProcessMemory` - Cross-process memory writes (detects code injection)
-  - `LoadLibraryW` - DLL loading (detects DLL injection)
-  - `LoadLibraryExW` - Extended DLL loading
-
-### 🎯 Real-Time Risk Scoring ✨ **NEW**
-- **Intelligent Threat Assessment**: Every intercepted operation analyzed in real-time
-- **0-100 Risk Score**: Quantitative threat rating based on multiple factors
-- **Threat Categorization**: Four-tier classification system
-  - 🟢 **LOW** (0-30): Normal operations, minimal risk
-  - 🟡 **MEDIUM** (31-60): Potentially suspicious, warrants attention
-  - 🟠 **HIGH** (61-85): Likely malicious, strong indicators
-  - 🔴 **CRITICAL** (86-100): Almost certainly malicious, immediate action recommended
-- **Context-Aware Analysis**: Scoring considers operation type, target location, parameters
-- **Smart Filtering**: Auto-allows read-only operations to reduce prompt fatigue by ~60%
-- **Detection Patterns**:
-  - **Persistence**: Registry Run keys (+65 risk), Startup folders (+60 risk)
-  - **Code Injection**: Remote thread creation (+95 risk), cross-process memory writes (+85 risk)
-  - **DEP Bypass**: RWX memory allocation (+65 risk), memory protection changes (+60 risk)
-  - **Ransomware**: `.encrypted`/`.locked` extensions (+70 risk), rapid file operations
-  - **UAC Bypass**: Environment variable manipulation (+70 risk)
-  - **Security Tampering**: Windows Defender/Firewall modifications (+70 risk)
-  - **C2 Communication**: Suspicious ports 4444/31337 (+55 risk), large data exfiltration (+40 risk)
-  - **Living-off-the-Land**: PowerShell encoded commands (+50 risk), LOLBAS abuse (+40 risk)
-
-### 🔍 Comprehensive Monitoring
-- **File System**: File/folder creation, modification, deletion (real-time via API hooks)
-- **Network**: TCP/UDP connections (intercepted before connect)
-- **Registry**: Registry operations (intercepted before modification)
-- **Processes**: Complete process tree tracking with Toolhelp32
-
-### 🚨 Behavioral Threat Detection
-Automatically detects:
-- **Ransomware**: Rapid file encryption, suspicious extensions (`.encrypted`, `.locked`)
-- **Persistence**: Registry Run keys, startup folders, scheduled tasks
-- **Process Injection**: Remote thread creation, cross-process memory writes ✨ **NEW**
-- **Code Execution**: RWX memory allocation, DEP bypass attempts ✨ **NEW**
-- **DLL Injection**: Suspicious DLL loading from temp directories ✨ **NEW**
-- **UAC Bypass**: Environment variable manipulation, `ms-settings` abuse
-- **Security Tampering**: Windows Defender/firewall modifications
-- **C2 Communications**: Suspicious ports (4444, 8080, 31337), large data transfers ✨ **NEW**
-- **PowerShell Abuse**: Encoded commands, download cradles, hidden window execution
-- **Folder Operations**: Suspicious folder creation/deletion (ProgramData, System32)
-
-### 🔒 Process Isolation
-- **Windows Job Objects**: Hard resource limits (memory, CPU)
-- **CREATE_SUSPENDED**: Process starts suspended until user approval
-- **Process Tree Control**: Suspend/resume using Toolhelp32 + threading APIs
-- **Network Isolation**: Internet access OFF by default
-- **Dual Console**: Target runs in separate window (clean monitoring UI)
-
-### 📊 Professional Reporting
-- **Color-coded Console Output**: Events with icons and risk levels
-- **JSON Exports**: Comprehensive machine-readable reports
-- **Event Statistics**: Breakdown by operation type
-- **Threat Summaries**: Detected behavioral patterns
-
----
-
-## 🏗️ Architecture
-
-### Two-Process Design
-
-Rusty Sand uses a sophisticated two-process architecture for real-time prevention:
-
-```ps1
-┌───────────────────────────────────────────────────────────┐
-│                    Main Process                           │
-│                  (rusty_sand.exe)                         │
-│                                                           │
-│  ┌─────────────┐    ┌──────────────┐   ┌──────────────┐   │
-│  │   Process   │    │  Monitoring  │   │  Behavioral  │   │
-│  │  Controller │    │    Engine    │   │   Analyzer   │   │
-│  └─────────────┘    └──────────────┘   └──────────────┘   │
-│          │                  │                   │         │
-│          └──────────────────┼───────────────────┘         │
-│                             │                             │
-│                    ┌────────▼────────┐                    │
-│                    │   IPC Server    │                    │
-│                    │  (Named Pipe)   │                    │
-│                    └────────┬────────┘                    │
-└─────────────────────────────┼─────────────────────────────┘
-                              │
-                   \\.\pipe\rusty_sand_hooks
-                              │
-┌─────────────────────────────▼──────────────────────────────┐
-│                   Target Process                           │
-│                   (suspended.exe)                          │
-│                                                            │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │          rusty_sand_hooks.dll (injected)            │   │
-│  │                                                     │   │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌───────────┐   │   │
-│  │  │  CreateFileW│  │   connect()  │  │RegSetValue│   │   │
-│  │  │    Hook     │  │     Hook     │  │   Hook    │   │   │
-│  │  └─────────────┘  └──────────────┘  └───────────┘   │   │
-│  │         │                 │                │        │   │
-│  │         └─────────────────┼────────────────┘        │   │
-│  │                           │                         │   │
-│  │                  ┌────────▼────────┐                │   │
-│  │                  │   IPC Client    │                │   │
-│  │                  │(request_approval)                │   │
-│  │                  └─────────────────┘                │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                            │
-│  Original Windows APIs (via MinHook trampolines)           │
-└────────────────────────────────────────────────────────────┘
+```powershell
+cargo build --locked --release --workspace
+.\target\release\rusty_sand.exe --help
 ```
 
-### Execution Flow
+Build the whole workspace. Hook-enabled execution requires
+`rusty_sand_hooks.dll` beside `rusty_sand.exe`, built for the same architecture.
+Building only the root package does not build the DLL.
 
-1. **Initialization**
-   - Main process creates target in `CREATE_SUSPENDED` state
-   - IPC server starts on named pipe `\\.\pipe\rusty_sand_hooks`
-   - Hook DLL (`rusty_sand_hooks.dll`) injected via `CreateRemoteThread`
-   - DLL connects to IPC server and installs MinHook hooks
+| Crate | Purpose |
+| --- | --- |
+| `rusty_sand` | CLI, execution lifecycle, observation, analysis, and reports |
+| `rusty_sand_hooks` | Injected Windows DLL and API interceptors |
+| `rusty_sand_protocol` | Shared message schemas and operation classification |
 
-2. **Initial Approval**
-   - User prompted to allow initial execution
-   - If approved: process resumes, hooks are active
-   - If denied: process terminated immediately
+Configuration, report handling, scoring, protocol tests, and CLI parsing can run
+on non-Windows hosts. Executing a target process requires Windows; the CLI
+returns an explicit error rather than substituting a simulated execution.
 
-3. **Real-Time Interception**
-   - Target calls `CreateFileW()` → hook intercepts
-   - Hook extracts parameters (file path, flags, attributes)
-   - Hook sends `HookRequest` to main process via named pipe
-   - Main process prompts user: Allow/Deny/Terminate
-   - Response sent back to hook DLL
-   - If allowed: call original API via trampoline
-   - If denied: return error handle WITHOUT calling original API
+## Usage
 
-4. **Shutdown**
-   - Process exits (normally or terminated)
-   - Shutdown signal sent to all monitoring tasks
-   - 500ms grace period for cleanup
-   - Report generated
-
-### Workspace Structure
-
-This is a **Cargo workspace** with two crates:
-
-- **rusty_sand** - Main executable (binary crate)
-- **rusty_sand_hooks** - Hook DLL (cdylib crate) → compiles to `rusty_sand_hooks.dll`
-
-Both must be built for full functionality. The DLL must be in the same directory as the executable.
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Windows 10/11 (x64)
-- Rust toolchain (1.70+)
-- Administrator privileges (recommended for full functionality)
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/rusty_sand.git
-cd rusty_sand
-
-# Build both main executable AND hook DLL (REQUIRED)
-cargo build --release --workspace
-
-# Binaries will be at:
-#   target\release\rusty_sand.exe
-#   target\release\rusty_sand_hooks.dll (must be in same directory!)
+```powershell
+.\target\release\rusty_sand.exe C:\Windows\System32\notepad.exe
+.\target\release\rusty_sand.exe program.exe --timeout 60 --memory 512
+.\target\release\rusty_sand.exe program.exe --format json --output .\reports
+.\target\release\rusty_sand.exe program.exe -- --target-option "argument with spaces"
 ```
 
-**Important**: You must build the entire workspace. The hook DLL is required for API interception to work.
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--internet`, `-i` | Off | Allow connections under the requested policy; also enable DNS |
+| `--dns`, `-d` | Off | Allow DNS under the requested policy |
+| `--timeout`, `-t` | `300` | Execution deadline in seconds |
+| `--memory`, `-m` | `1024` | Process memory limit in MB; zero means unlimited |
+| `--workdir`, `-w` | Inherited | Target working directory |
+| `--output`, `-o` | `./sandbox_output` | Report directory |
+| `--format`, `-f` | `both` | `console`, `json`, or `both` |
+| `--verbose`, `-v` | Off | Debug logging |
+| `--log-network` | Off | Log observed network endpoints; not packet capture |
+| `--no-registry` | Off | Disable registry monitoring and deny intercepted registry requests |
+| `--no-interactive` | Off | Make decisions without interactive prompts |
+| `--no-behavior-detection` | Off | Disable event-history analysis |
 
-### Basic Usage
+Arguments after `--` belong to the target, not Rusty Sand. Unknown report formats
+are rejected. There is no `--no-internet` flag: the internet policy is disabled by
+default. Disabling interactive prompts is not the same as disabling hooks.
 
-```bash
-# Run with interactive HIPS mode (default)
-.\target\release\rusty_sand.exe suspicious.exe
+Policy settings apply only where an implemented interceptor can enforce them.
+They are not a firewall, a restricted desktop, or a virtual filesystem. See
+[coverage and limitations](FEATURES.md) before interpreting a report.
 
-# Run in passive monitoring mode (no prompts, post-execution analysis only)
-.\target\release\rusty_sand.exe --no-interactive malware.exe
+## Reports and library use
 
-# Enable internet access (⚠️ use with extreme caution!)
-.\target\release\rusty_sand.exe --internet suspicious.exe
+JSON output is saved to `OUTPUT/report.json`. A report includes the executable,
+start and end timestamps, duration, exit code, effective configuration, and
+ordered events. Hook events describe intercepted requests; observations describe
+activity detected separately. Both may refer to the same operation, so event
+counts are not counts of unique completed actions.
 
-# Custom timeout and memory limits
-.\target\release\rusty_sand.exe -t 60 -m 512 program.exe
+The Windows library entry point is `execute_sandboxed`. Configuration is built
+through `SandboxConfig`; results use `SandboxReport`. Risk categories expose
+`ThreatCategory::as_str()` for plain-text labels; the unused decorative
+`color_code()` helper has been removed. See the compiling examples:
 
-# Pass arguments to sandboxed program
-.\target\release\rusty_sand.exe program.exe -- arg1 arg2 arg3
+- [Basic usage](examples/basic_usage.rs): launch Notepad and save a report.
+- [Advanced monitoring](examples/advanced_monitoring.rs): observe a benign
+  PowerShell process listing with hooks explicitly disabled through the library.
 
-# Verbose debug output
-.\target\release\rusty_sand.exe -v suspicious.exe
+Run examples manually on Windows after building the workspace. They launch real
+programs and are not substitutes for unit tests.
 
-# Disable API hooks (passive monitoring only)
-.\target\release\rusty_sand.exe --no-interactive suspicious.exe
+## Development
+
+```sh
+cargo fmt --all -- --check
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 ```
 
----
-
-## 📖 Command-Line Options
-
-### Required
-- `EXECUTABLE` - Path to executable to sandbox (absolute or relative)
-
-### Optional Flags
-- `-i, --internet` - Enable internet access (⚠️ **DEFAULT: DISABLED**)
-- `-d, --dns` - Enable DNS resolution
-- `-t, --timeout <SECONDS>` - Execution timeout (default: 300)
-- `-m, --memory <MB>` - Memory limit in MB (default: 1024)
-- `-w, --workdir <PATH>` - Working directory for process
-- `-o, --output <DIR>` - Output directory (default: ./sandbox_output)
-- `-f, --format <FORMAT>` - Output format: `console`, `json`, `both` (default: both)
-- `-v, --verbose` - Enable verbose debug output
-- `--log-network` - Enable detailed network packet logging
-- `--no-registry` - Disable registry monitoring
-- `--no-interactive` - Disable HIPS mode (passive monitoring only)
-- `--no-behavior-detection` - Disable behavioral threat detection
-
-### View Full Help
-```bash
-rusty_sand.exe --help
-```
-
----
-
-## 🎯 Interactive Mode (HIPS)
-
-When running with API hooks enabled (default), Rusty Sand intercepts operations **before execution** and prompts in real-time with **intelligent risk scoring**:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️  INTERCEPTED OPERATION #5
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  ACTION: CREATE REMOTE THREAD (Process Injection)
-  TARGET: explorer.exe (PID 1234)
-  DETAILS: Start address: 0x7FFE0000
-
-  RISK SCORE: 🔴 95/100 [CRITICAL]
-
-  🛑 BLOCKED - Waiting for your decision...
-
-  [Y]es / [A]llow All / [N]o / [D]eny All / [T]erminate >
-```
-
-Risk scores help you make informed decisions:
-- 🟢 **LOW (0-30)**: Safe to allow, normal operations
-- 🟡 **MEDIUM (31-60)**: Review carefully before allowing
-- 🟠 **HIGH (61-85)**: Suspicious, likely deny unless expected
-- 🔴 **CRITICAL (86-100)**: Almost certainly malicious, deny recommended
-
-### Decision Options
-
-When an operation is intercepted:
-
-- **[Y]es** - Allow this single operation (calls original API)
-- **[A]llow All** - Auto-allow ALL future operations of this type (no more prompts)
-- **[N]o** - Block this single operation (returns error to target)
-- **[D]eny All** - Auto-block ALL future operations of this type (no more prompts)
-- **[T]erminate** - Immediately kill the entire process
-
-**If you choose [N]o**, you'll see a follow-up prompt:
-
-```
-  🚫 BLOCKED
-
-  [C]ontinue / [T]erminate >
-```
-
-- **[C]ontinue** - Continue monitoring the process
-- **[T]erminate** - Kill the process immediately
-
----
-
-## 📊 Report Example
-
-### Console Output
-```
-═══════════════════════════════════════════════════
-           SANDBOX EXECUTION REPORT
-═══════════════════════════════════════════════════
-
-📋 EXECUTION DETAILS
-  Executable:     suspicious.exe
-  Start Time:     2025-10-10 14:30:00 UTC
-  End Time:       2025-10-10 14:32:15 UTC
-  Duration:       135 seconds
-  Exit Code:      0
-
-🔐 SECURITY CONFIGURATION
-  Internet:       DISABLED ✓
-  API Hooks:      ENABLED (17 hooks active - +112% coverage) ✨
-  Risk Scoring:   ENABLED (Real-time threat assessment) ✨
-  Interactive:    ENABLED (HIPS mode)
-  Memory Limit:   1024 MB
-
-📊 EVENT SUMMARY
-  Total Events:        68
-  File Operations:     12
-  Folder Operations:   3
-  Process Operations:  8 ✨
-  Memory Operations:   5 ✨
-  Network Blocked:     2 ⚠️
-  Registry Operations: 38
-
-🚨 THREATS DETECTED (Risk Score)
-  [CRITICAL 95] Remote thread injection attempt in explorer.exe ✨
-  [CRITICAL 90] Registry persistence: HKLM\Run key modified
-  [HIGH 85]     Cross-process memory write to svchost.exe ✨
-  [HIGH 75]     RWX memory allocation (shellcode indicator) ✨
-  [MEDIUM 55]   Suspicious folder creation in ProgramData
-  [MEDIUM 45]   Attempted connection to C2 port 4444
-
-📝 RECENT EVENTS (last 100)
-  📁 [14:30:05] FolderCreated: C:\ProgramData\Malware
-  📄 [14:30:08] FileCreated: C:\temp\output.txt
-  🌐 [14:30:12] NetworkBlocked: TCP 192.168.1.100:4444
-  ...
-```
-
-### JSON Report
-Saved to `sandbox_output/report.json` with complete event details, timestamps, user decisions, and configuration.
-
----
-
-## 🔧 Library Usage
-
-Rusty Sand can be used as a Rust library:
-
-```rust
-use rusty_sand::{execute_sandboxed, SandboxConfig};
-use std::time::Duration;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut config = SandboxConfig::new()
-        .with_internet(false)
-        .with_timeout(Duration::from_secs(60))
-        .with_memory_limit(512)
-        .with_verbose(true);
-
-    // Enable API hooks for real-time prevention
-    config.enable_api_hooks = true;
-    config.interactive_mode = true;
-
-    let report = execute_sandboxed(
-        "suspicious.exe",
-        &["arg1".to_string(), "arg2".to_string()],
-        config
-    ).await?;
-
-    println!("Total events: {}", report.events.len());
-    println!("Exit code: {}", report.exit_code);
-
-    // Access specific event types
-    let file_events = report.get_file_events();
-    let network_events = report.get_network_events();
-
-    // Analyze threats
-    for event in report.events {
-        if event.event_type == rusty_sand::report::EventType::FolderDeleted {
-            println!("Folder deleted: {}", event.details);
-        }
-    }
-
-    Ok(())
-}
-```
-
-See [examples/basic_usage.rs](examples/basic_usage.rs) and [examples/advanced_monitoring.rs](examples/advanced_monitoring.rs).
-
----
-
-## 🔬 Detection Capabilities
-
-### Ransomware Detection
-- Rapid file creation patterns (>50 files in short time)
-- Suspicious file extensions (`.encrypted`, `.locked`, `.crypto`)
-- Mass file deletion in user directories
-
-### Persistence Detection
-- Registry Run key modifications (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`)
-- Startup folder access
-- Scheduled task creation
-- Service installation
-
-### Folder-Based Threats (NEW)
-- Suspicious folder creation in `ProgramData` (persistence)
-- Hidden folder creation (names starting with `.`)
-- Critical system folder deletion (`System32`, `Program Files`)
-- User data folder deletion (`Documents`, `Desktop`, `Downloads`)
-
-### UAC Bypass Detection
-- `HKCU\Environment\windir` manipulation
-- `ms-settings` protocol abuse
-- DLL hijacking patterns
-
-### Network Threats
-- C2 server communication (ports 4444, 8080, 31337)
-- Blocked connections when internet disabled
-- Unusual connection patterns
-
----
-
-## ⚙️ Component Architecture
-
-### Main Process Components
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| **Process Controller** | [src/control/mod.rs](src/control/mod.rs) | Suspend/resume threads via Toolhelp32 |
-| **Interactive Controller** | [src/control/interactive.rs](src/control/interactive.rs) | HIPS prompts and user decisions |
-| **Monitoring Engine** | [src/monitor/mod.rs](src/monitor/mod.rs) | Event collection, IPC server loop, risk analysis integration |
-| **File Monitor** | [src/monitor/filesystem.rs](src/monitor/filesystem.rs) | Directory watching (notify crate) |
-| **Network Monitor** | [src/monitor/network.rs](src/monitor/network.rs) | TCP/UDP table polling |
-| **Process Monitor** | [src/monitor/process.rs](src/monitor/process.rs) | Process tree tracking |
-| **Risk Scorer** ✨ **NEW** | [src/analysis/risk_scorer.rs](src/analysis/risk_scorer.rs) | Real-time threat scoring (0-100 scale) |
-| **Behavioral Analyzer** | [src/behavior/mod.rs](src/behavior/mod.rs) | Threat pattern detection |
-| **Sandbox** | [src/sandbox/process.rs](src/sandbox/process.rs) | Job objects, process creation |
-| **IPC Protocol** | [src/ipc/mod.rs](src/ipc/mod.rs) | Named pipe communication |
-| **DLL Injection** | [src/injection/mod.rs](src/injection/mod.rs) | DLL injection via remote thread |
-
-### Hook DLL Components (Modular Architecture ✨ **NEW**)
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| **Hook DLL Entry Point** | [rusty_sand_hooks/src/lib.rs](rusty_sand_hooks/src/lib.rs) | DLL initialization and MinHook orchestration |
-| **File Hooks** | [rusty_sand_hooks/src/hooks/file_hooks.rs](rusty_sand_hooks/src/hooks/file_hooks.rs) | `CreateFileW`, `DeleteFileW` interception |
-| **Folder Hooks** | [rusty_sand_hooks/src/hooks/folder_hooks.rs](rusty_sand_hooks/src/hooks/folder_hooks.rs) | `CreateDirectoryW`, `RemoveDirectoryW` interception |
-| **Network Hooks** | [rusty_sand_hooks/src/hooks/network_hooks.rs](rusty_sand_hooks/src/hooks/network_hooks.rs) | `connect` interception |
-| **Registry Hooks** | [rusty_sand_hooks/src/hooks/registry_hooks.rs](rusty_sand_hooks/src/hooks/registry_hooks.rs) | Registry operation interception (4 hooks) |
-| **Process Hooks** ✨ **NEW** | [rusty_sand_hooks/src/hooks/process_hooks.rs](rusty_sand_hooks/src/hooks/process_hooks.rs) | Process/thread creation interception (3 hooks) |
-| **Memory Hooks** ✨ **NEW** | [rusty_sand_hooks/src/hooks/memory_hooks.rs](rusty_sand_hooks/src/hooks/memory_hooks.rs) | Memory/DLL operation interception (5 hooks) |
-| **IPC Types** | [rusty_sand_hooks/src/types.rs](rusty_sand_hooks/src/types.rs) | Enhanced operation types with rich metadata |
-| **IPC Client** | [rusty_sand_hooks/src/ipc_client.rs](rusty_sand_hooks/src/ipc_client.rs) | Named pipe communication layer |
-| **Registry Utils** | [rusty_sand_hooks/src/registry_utils.rs](rusty_sand_hooks/src/registry_utils.rs) | HKEY-to-string conversion utilities |
-| **Logging System** ✨ **NEW** | [rusty_sand_hooks/src/logging.rs](rusty_sand_hooks/src/logging.rs) | Professional file-based logging with `hook_log!()` macro |
-
-**Hooked Functions** (17 total - **+112% increase**):
-- **File Operations (2)**: `CreateFileW`, `DeleteFileW`
-- **Folder Operations (2)**: `CreateDirectoryW`, `RemoveDirectoryW`
-- **Network Operations (1)**: `connect`
-- **Registry Operations (4)**: `RegSetValueExW`, `RegDeleteKeyW`, `RegQueryValueExW`, `RegOpenKeyExW`
-- **Process/Thread Operations (3)** ✨ **NEW**: `CreateProcessW`, `CreateThread`, `CreateRemoteThread`
-- **Memory/DLL Operations (5)** ✨ **NEW**: `VirtualAlloc`, `VirtualProtect`, `WriteProcessMemory`, `LoadLibraryW`, `LoadLibraryExW`
-
----
-
-## 🛠️ Development
-
-### Building from Source
-
-```bash
-# Build main executable only
-cargo build --release
-
-# Build hook DLL only
-cargo build --release --package rusty_sand_hooks
-
-# Build entire workspace (recommended)
-cargo build --release --workspace
-
-# Debug build (faster compilation)
-cargo build --workspace
-
-# Check code without building
-cargo check --workspace
-
-# Run clippy linter
-cargo clippy --workspace -- -D warnings
-
-# Format code
-cargo fmt --all
-```
-
-### Project Structure
-```
-rusty_sand/
-├── src/                      # Main executable crate
-│   ├── analysis/             # Risk scoring system ✨ NEW
-│   │   ├── mod.rs
-│   │   └── risk_scorer.rs    # 0-100 threat scoring
-│   ├── behavior/             # Threat detection engine
-│   ├── control/              # Process control & HIPS
-│   ├── monitor/              # Monitoring subsystems
-│   ├── report/               # Reporting and output
-│   ├── sandbox/              # Process isolation
-│   ├── ipc/                  # Named pipe IPC
-│   ├── injection/            # DLL injection
-│   ├── config.rs             # Configuration
-│   ├── lib.rs                # Library entry point
-│   └── main.rs               # CLI entry point
-├── rusty_sand_hooks/         # Hook DLL crate (modular architecture ✨ NEW)
-│   ├── src/
-│   │   ├── hooks/            # Organized by category ✨ NEW
-│   │   │   ├── file_hooks.rs
-│   │   │   ├── folder_hooks.rs
-│   │   │   ├── network_hooks.rs
-│   │   │   ├── registry_hooks.rs
-│   │   │   ├── process_hooks.rs  ✨ NEW
-│   │   │   └── memory_hooks.rs   ✨ NEW
-│   │   ├── types.rs          # Enhanced IPC types ✨ NEW
-│   │   ├── ipc_client.rs     # IPC communication ✨ NEW
-│   │   ├── registry_utils.rs # HKEY utilities ✨ NEW
-│   │   ├── logging.rs        # Professional logging ✨ NEW
-│   │   ├── utils.rs          # Common utilities ✨ NEW
-│   │   └── lib.rs            # DLL entry point (refactored)
-│   └── Cargo.toml            # DLL dependencies
-├── examples/                 # Usage examples
-├── Cargo.toml                # Workspace config
-├── EXECUTION_FLOW.md         # Architecture documentation
-└── README.md
-```
-
-### Running Examples
-
-```bash
-cargo run --release --example basic_usage
-cargo run --release --example advanced_monitoring
-```
-
----
-
-## ✨ Recent Major Improvements
-
-### Version 2.0 - Intelligence & Modularity Update
-
-**🎯 Real-Time Risk Scoring System**
-- Intelligent 0-100 threat assessment for every intercepted operation
-- Four-tier categorization (Low/Medium/High/Critical) with color-coded display
-- Context-aware scoring considering operation type, target, and parameters
-- Smart filtering auto-allows read-only operations (60% reduction in prompt fatigue)
-
-**🛡️ Expanded API Coverage (+112%)**
-- **17 hooked APIs** (up from 8) - comprehensive protection coverage
-- **Process/Thread hooks**: Detect process injection, remote thread creation
-- **Memory/DLL hooks**: Catch RWX allocations, DEP bypasses, code injection
-- **Enhanced file/folder/registry/network interception** with rich metadata
-
-**🏗️ Professional Modular Architecture**
-- Hook DLL refactored from 809-line monolith to organized module system
-- Category-based organization (file, folder, network, registry, process, memory)
-- Clean separation of concerns for maintainability
-- File-based logging system with configurable levels and timestamps
-
-**🔍 Enhanced Detection Capabilities**
-- **Process Injection Detection**: `CreateRemoteThread`, cross-process memory writes
-- **Code Execution Detection**: RWX memory allocations, memory protection changes
-- **DLL Injection Detection**: Suspicious library loading patterns
-- **Advanced Persistence**: Comprehensive startup and autorun detection
-- **Living-off-the-Land**: PowerShell abuse, LOLBAS detection
-
-**📊 Improved User Experience**
-- Risk scores displayed in real-time prompts with emoji indicators (🟢🟡🟠🔴)
-- Human-readable registry paths (`HKLM\Software\...` instead of raw pointers)
-- Comprehensive operation metadata (access rights, share modes, protection flags)
-- Professional logging for debugging hook DLL behavior
-
----
-
-## ⚠️ Limitations
-
-- **Windows Only**: Uses Win32 APIs exclusively (Job Objects, Toolhelp32, Named Pipes)
-- **User-Mode**: Cannot intercept kernel-level operations or drivers
-- **Evasion**: Sophisticated malware can detect hooks (MinHook inline hooking)
-- **Performance**: HIPS mode significantly slows execution due to user prompts
-- **Admin Privileges**: Some features require elevation
-- **Hook DLL Dependency**: API interception requires successful DLL injection
-
----
-
-## 🤝 Contributing
-
-Contributions welcome for:
-- Additional API hooks (`WriteFile`, `NtCreateFile`, `GetProcAddress`, etc.)
-- Enhanced risk scoring algorithms and detection patterns
-- Behavioral detection rules (YARA-style, MITRE ATT&CK mapping)
-- Performance optimizations (async hook handling, caching)
-- Better Windows API integration (kernel callbacks, ETW tracing)
-- Machine learning integration for risk scoring
-- Bug fixes and stability improvements
-- Documentation and examples
-
-**Please ensure all contributions are for defensive security purposes only.**
-
----
-
-## 📝 License
-
-MIT License - See LICENSE file for details.
-
-**For defensive security research only. The authors are not responsible for misuse.**
-
----
-
-## 👥 Authors
-
-- **GuestAUser** - Creator and primary developer
-
-## 🙏 Acknowledgments
-
-- [MinHook](https://github.com/TsudaKageyu/minhook) - x86/x64 API hooking library
-- Windows API documentation and community
-- Rust security community
-- Malware analysis research community
-- Practical Malware Analysis: The Hands-On Guide to Dissecting Malicious Software 1st Edition
-by Michael Sikorski (Author), Andrew Honig (Author)
-
----
-
-## 📚 Related Projects
-
-- [Cuckoo Sandbox](https://cuckoosandbox.org/) - Automated malware analysis
-- [CAPE Sandbox](https://capesandbox.com/) - Advanced malware analysis
-- [Sandboxie](https://github.com/sandboxie-plus/Sandboxie) - Application sandboxing
-- [Any.Run](https://any.run/) - Interactive malware analysis service
-
----
-
-**Stay safe and sandbox everything! 🏖️**
-
-
-
-
-
-
+Run these on Windows to cover the platform implementation. Portable tests on
+Linux exercise domain logic and protocol behavior but do not validate Win32
+calls, DLL injection, or interception. The CI configuration checks both surfaces.
+It also runs the portable hook-boundary tests under Miri.
+
+Tests live in `tests/unit/`, `rusty_sand_hooks/tests/unit/`, and
+`crates/protocol/tests/`. Implementation files contain test-module references,
+not embedded test bodies. Keep new tests in those dedicated directories.
+
+Use descriptive names, explicit ownership, and focused modules. Comments should
+explain non-obvious protocol, lifetime, or operating-system constraints in coherent
+blocks; avoid narrating individual statements. Keep formatting changes separate
+from behavior changes when reviewing a patch. Tests should observe behavior,
+including error and cleanup paths, without relying on fixed sleeps.
+
+The implementation map and lifecycle constraints are in
+[EXECUTION_FLOW.md](EXECUTION_FLOW.md).
+
+## License
+
+[MIT](LICENSE).

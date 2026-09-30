@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - run: cargo fmt --all -- --check
+
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - run: cargo test --locked --workspace --all-targets
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Miri
+        run: rustup toolchain install nightly --profile minimal --component miri --component rust-src
+      - name: Check portable hook boundaries
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-preemption-rate=0.1
+        run: cargo +nightly miri test --locked -p rusty_sand_hooks --lib
+      - name: Check Tree Borrows
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-preemption-rate=0.1
+        run: cargo +nightly miri test --locked -p rusty_sand_hooks --lib
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - run: cargo check --locked --package rusty_sand_hooks --all-targets
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --all-targets
