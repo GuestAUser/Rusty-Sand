@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use rusty_sand::report::analysis::AnalysisMode;
 use rusty_sand::ui::{ColorMode, OutputPolicy};
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ pub(crate) enum ReportFormat {
 
 #[derive(Parser, Debug)]
 #[command(name = "rusty_sand", author, version)]
-#[command(about = "Run a Windows executable and report observed activity")]
+#[command(about = "Inspect files and analyze Windows executable behavior")]
 #[command(
     after_help = "Monitoring and API hooks do not provide complete host isolation or guaranteed network blocking. Use a disposable Windows VM for untrusted programs. Pass target arguments after --."
 )]
@@ -31,6 +32,22 @@ pub(crate) struct Args {
     /// Arguments forwarded unchanged to the executable after --
     #[arg(value_name = "ARGS", last = true)]
     pub args: Vec<String>,
+
+    /// Inspect the file without executing it (also supported on non-Windows hosts)
+    #[arg(long = "static", conflicts_with_all = ["debug_mode", "shell_mode", "restricted"])]
+    pub static_only: bool,
+
+    /// Trace native Windows debug events instead of injecting API hooks
+    #[arg(long = "debug", conflicts_with = "shell_mode")]
+    pub debug_mode: bool,
+
+    /// Open an analyst shell with inspection and live execution controls
+    #[arg(long = "shell")]
+    pub shell_mode: bool,
+
+    /// Launch with a restricted Windows token; fail if it cannot be applied
+    #[arg(long)]
+    pub restricted: bool,
 
     /// Allow internet in the requested policy; also enables DNS
     #[arg(short = 'i', long = "internet")]
@@ -52,7 +69,7 @@ pub(crate) struct Args {
     #[arg(short = 'o', long = "output", default_value = "./sandbox_output")]
     pub output_dir: PathBuf,
 
-    /// Summary destination; JSON is saved as OUTPUT/report.json
+    /// Output selection; JSON artifacts are saved inside OUTPUT
     #[arg(short = 'f', long = "format", value_enum, default_value = "both")]
     pub format: ReportFormat,
 
@@ -94,6 +111,44 @@ pub(crate) struct Args {
 }
 
 impl Args {
+    pub(crate) fn mode(&self) -> AnalysisMode {
+        if self.static_only {
+            AnalysisMode::Static
+        } else if self.debug_mode {
+            AnalysisMode::Debug
+        } else if self.shell_mode {
+            AnalysisMode::Shell
+        } else {
+            AnalysisMode::Execute
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn sandbox_config(&self) -> rusty_sand::SandboxConfig {
+        use rusty_sand::SandboxConfig;
+        use std::time::Duration;
+
+        let mut config = SandboxConfig::new()
+            .with_internet(self.internet)
+            .with_timeout(Duration::from_secs(self.timeout))
+            .with_output_dir(self.output_dir.clone())
+            .with_memory_limit(self.max_memory)
+            .with_verbose(self.verbose);
+
+        config.working_dir = self.working_dir.clone();
+        config.allow_dns = self.dns || self.internet;
+        config.log_network_packets = self.log_network;
+        config.allow_registry = !self.no_registry;
+        config.interactive_mode = !self.no_interactive;
+        config.cancel_on_stdin_eof =
+            std::env::var("RUSTY_SAND_STDIN_CONTROL").as_deref() == Ok("1");
+        config.restricted_token = self.restricted;
+        config.enable_api_hooks = !self.debug_mode;
+        config.enable_behavior_detection = !self.no_behavior_detection && !self.debug_mode;
+
+        config
+    }
+
     pub(crate) fn output_policy(&self) -> OutputPolicy {
         let tty = match std::env::var("RUSTY_SAND_STDERR_TTY").as_deref() {
             Ok("1") => true,

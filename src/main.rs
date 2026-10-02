@@ -1,4 +1,5 @@
 mod cli;
+mod commands;
 
 use clap::Parser;
 use cli::Args;
@@ -11,9 +12,7 @@ fn main() -> ExitCode {
     finish(
         ui::configure(args.output_policy())
             .map_err(anyhow::Error::from)
-            .and_then(|()| {
-                anyhow::bail!("Rusty Sand execution requires Windows; from WSL use ./rusty-sand")
-            }),
+            .and_then(|()| commands::run_portable(&args)),
     )
 }
 
@@ -64,12 +63,14 @@ impl log::Log for RendererLogger {
 #[cfg(windows)]
 async fn run(args: Args) -> anyhow::Result<()> {
     use anyhow::Context;
-    use cli::ReportFormat;
-    use rusty_sand::{execute_sandboxed, SandboxConfig};
-    use std::time::Duration;
+    use rusty_sand::report::analysis::AnalysisMode;
 
     let policy = args.output_policy();
     ui::configure(policy)?;
+
+    if args.mode() == AnalysisMode::Static {
+        return commands::run_static(&args);
+    }
 
     /* env_logger remains the filter parser, including module directives and
      * regex filtering. Only its sink is replaced, so diagnostics participate
@@ -83,25 +84,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .context("Failed to initialize logging")?;
     log::set_max_level(filter);
 
-    let mut config = SandboxConfig::new()
-        .with_internet(args.internet)
-        .with_timeout(Duration::from_secs(args.timeout))
-        .with_output_dir(args.output_dir.clone())
-        .with_memory_limit(args.max_memory)
-        .with_verbose(args.verbose);
-
-    config.working_dir = args.working_dir;
-    config.allow_dns = args.dns || args.internet;
-    config.log_network_packets = args.log_network;
-    config.allow_registry = !args.no_registry;
-    config.interactive_mode = !args.no_interactive;
-    config.cancel_on_stdin_eof = std::env::var("RUSTY_SAND_STDIN_CONTROL").as_deref() == Ok("1");
-    config.enable_behavior_detection = !args.no_behavior_detection;
+    let config = args.sandbox_config();
 
     ui::terminal().panel(&Panel {
         title: "Effective configuration".into(),
         tone: Tone::Heading,
         fields: vec![
+            ("Mode".into(), format!("{:?}", args.mode())),
             ("Target".into(), args.executable.clone()),
             ("Arguments".into(), format!("{:?}", args.args)),
             ("Reports".into(), config.output_dir.display().to_string()),
@@ -109,51 +98,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
             ("Timeout".into(), format!("{} seconds", config.timeout.as_secs())),
             ("Memory limit".into(), format!("{} MB (0 = unlimited)", config.max_memory_mb)),
             ("CPU limit".into(), format!("{} seconds (0 = unlimited)", config.max_cpu_time)),
-            ("Internet / DNS".into(), format!("{} / {}", if config.allow_internet { "ALLOW" } else { "DENY" }, if config.allow_dns { "ALLOW" } else { "DENY" })),
-            ("Registry".into(), if config.allow_registry { "ALLOW" } else { "DENY" }.into()),
+            ("Requested internet / DNS".into(), format!("{} / {}", if config.allow_internet { "ALLOW" } else { "DENY" }, if config.allow_dns { "ALLOW" } else { "DENY" })),
+            ("Requested registry policy".into(), if config.allow_registry { "ALLOW" } else { "DENY" }.into()),
             ("Hooks / interactive".into(), format!("{} / {}", if config.enable_api_hooks { "ON" } else { "OFF" }, if config.interactive_mode { "ON" } else { "OFF" })),
             ("Behavior analysis".into(), if config.enable_behavior_detection { "ON" } else { "OFF" }.into()),
+            ("Restricted token".into(), if config.restricted_token { "REQUIRED" } else { "OFF" }.into()),
         ],
         notes: vec![
             "Monitoring is not a security boundary. Use a disposable Windows VM for untrusted programs.".into(),
             "Ctrl-C cancels the session and cleans up the target. Interactive input EOF also cancels.".into(),
+            "Debug mode does not inject hooks or enforce hook-based internet, DNS, registry, or filesystem policy.".into(),
         ],
     })?;
 
-    let mut report = execute_sandboxed(&args.executable, &args.args, config)
-        .await
-        .with_context(|| format!("Failed to execute {}", args.executable))?;
-    report.executable = args.executable;
-
-    if matches!(args.format, ReportFormat::Console | ReportFormat::Both) {
-        report.write_summary(&mut std::io::stderr().lock(), &policy)?;
-    }
-
-    if args.format == ReportFormat::Json {
-        ui::terminal().status(
-            &format!(
-                "Target exit code {}; {} recorded events",
-                report.exit_code,
-                report.events.len()
-            ),
-            if report.exit_code == 0 {
-                Tone::Success
-            } else {
-                Tone::Warning
-            },
-        )?;
-    }
-
-    if matches!(args.format, ReportFormat::Json | ReportFormat::Both) {
-        let json_path = args.output_dir.join("report.json");
-        report
-            .save_json(&json_path)
-            .with_context(|| format!("Failed to save report to {}", json_path.display()))?;
-        ui::terminal().status(
-            &format!("JSON report saved to: {}", json_path.display()),
-            Tone::Success,
-        )?;
-    }
-
-    Ok(())
+    commands::run_windows(args, config, policy).await
 }

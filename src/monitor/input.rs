@@ -41,10 +41,15 @@ impl Drop for PendingLine {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum InputEnd {
+pub(crate) enum InputEnd {
     Eof,
     Cancelled,
     Failed(String),
+}
+
+pub(crate) enum LineRead {
+    Line(String),
+    End(InputEnd),
 }
 
 /** One exclusive reader for native consoles and redirected UTF-8 pipes.
@@ -54,7 +59,7 @@ future prompts. No pipe read can block: PIPE_NOWAIT is established before spawn,
 and only cancellation/event waits may wait (at most 20 ms between pipe reads).
 The owner cancels and joins before restoring the shared pipe mode.
 */
-pub(super) struct ConsoleInput {
+pub(crate) struct ConsoleInput {
     backend: Backend,
     cancel: Arc<OwnedHandle>,
     request: Arc<OwnedHandle>,
@@ -65,12 +70,12 @@ pub(super) struct ConsoleInput {
 }
 
 impl ConsoleInput {
-    pub(super) fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         /* SAFETY: GetStdHandle is borrowed; Backend immediately duplicates it. */
         Self::from_handle(unsafe { GetStdHandle(STD_INPUT_HANDLE)? })
     }
 
-    fn from_handle(handle: HANDLE) -> Result<Self> {
+    pub(crate) fn from_handle(handle: HANDLE) -> Result<Self> {
         let backend = Backend::new(handle)?;
         /* SAFETY: Unnamed events have no borrowed name/security pointers. */
         let cancel = Arc::new(OwnedHandle::new(unsafe {
@@ -118,44 +123,84 @@ impl ConsoleInput {
         })
     }
 
-    pub(super) fn status(&self) -> watch::Receiver<Option<InputEnd>> {
+    pub(crate) fn status(&self) -> watch::Receiver<Option<InputEnd>> {
         self.status.clone()
     }
 
     /** Arm synchronously before returning the awaitable answer. Callers must
     create this future before displaying the prompt, then await it afterwards;
     otherwise a fast response is indistinguishable from unsolicited input. */
-    pub(super) fn read_line(&mut self) -> impl std::future::Future<Output = Result<String>> + '_ {
+    pub(crate) fn read_line(&mut self) -> impl std::future::Future<Output = Result<String>> + '_ {
+        /*
+         * Preserve the approval API: termination is never an approval.
+         * Reserve the request synchronously, before returning this future.
+         */
+        let read = self.read_line_event();
+
+        async move {
+            match read.await? {
+                LineRead::Line(line) => Ok(line),
+                LineRead::End(InputEnd::Failed(error)) => {
+                    Err(anyhow!("interactive input failed: {error}"))
+                }
+                LineRead::End(end) => Err(anyhow!("interactive input ended: {end:?}")),
+            }
+        }
+    }
+
+    /** Reserve one line synchronously and distinguish input termination from
+    a command. Reply-channel closure alone is not a termination reason. */
+    pub(crate) fn read_line_event(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<LineRead>> + '_ {
         let (reply, receive) = oneshot::channel();
         let ready = Arc::new(AtomicBool::new(false));
         let mut pending = PendingLine {
             receive,
             request: self.request.clone(),
         };
-        let end = self.status.borrow().clone();
-        let queued = match end {
-            Some(InputEnd::Failed(error)) => Err(anyhow!("interactive input failed: {error}")),
-            Some(end) => Err(anyhow!("interactive input ended: {end:?}")),
-            None => self.queue_request(Request {
+        let mut status = self.status.clone();
+        let end = status.borrow().clone();
+        let queued = if end.is_some() {
+            Ok(())
+        } else {
+            self.queue_request(Request {
                 boundary: 0,
                 ready: ready.clone(),
                 reply,
                 #[cfg(test)]
                 armed: None,
-            }),
+            })
         };
 
         async move {
-            queued?;
+            if let Some(end) = end {
+                return Ok(LineRead::End(end));
+            }
+
+            if let Err(error) = queued {
+                /*
+                 * The worker can drop its request receiver before publishing
+                 * completion. Only this typed disconnection waits for status;
+                 * queue-full, native signaling and other errors stay errors.
+                 */
+                if matches!(
+                    error.downcast_ref::<mpsc::TrySendError<Request>>(),
+                    Some(mpsc::TrySendError::Disconnected(_))
+                ) {
+                    return line_ended(&mut status).await;
+                }
+
+                return Err(error);
+            }
+
             /* The caller has now rendered its prompt. Keep native echo from
             racing begin_prompt while retaining bytes after the armed boundary
             in the kernel buffer until this first poll. */
             ready.store(true, Ordering::Release);
             /* SAFETY: The pending answer retains this event through the wait. */
             unsafe { SetEvent(pending.request.raw()) }.context("activate approval input")?;
-            (&mut pending.receive)
-                .await
-                .context("approval input worker stopped")?
+            receive_line(&mut pending.receive, &mut status).await
         }
     }
 
@@ -178,7 +223,7 @@ impl ConsoleInput {
         unsafe { SetEvent(self.request.raw()) }.context("signal approval input request")
     }
 
-    pub(super) fn close(&mut self) -> Result<()> {
+    pub(crate) fn close(&mut self) -> Result<()> {
         let mut result = Ok(());
         if let Some(worker) = self.worker.take() {
             /* Cancellation wins even if input or a request is also ready. */
@@ -208,6 +253,34 @@ impl Drop for ConsoleInput {
             log::error!("Approval input cleanup failed: {error:#}");
         }
     }
+}
+
+async fn receive_line(
+    receive: &mut oneshot::Receiver<Result<String>>,
+    status: &mut watch::Receiver<Option<InputEnd>>,
+) -> Result<LineRead> {
+    match receive.await {
+        Ok(result) => result.map(LineRead::Line),
+        Err(_) => {
+            /*
+             * read_requests drops active/pending replies while returning.
+             * Its caller publishes InputEnd afterwards. Await that publication
+             * rather than depending on select polling order or thread timing.
+             */
+            line_ended(status).await
+        }
+    }
+}
+
+async fn line_ended(status: &mut watch::Receiver<Option<InputEnd>>) -> Result<LineRead> {
+    let end = status
+        .wait_for(|end| end.is_some())
+        .await
+        .context("input worker ended without publishing its termination reason")?
+        .clone()
+        .context("input termination reason disappeared")?;
+
+    Ok(LineRead::End(end))
 }
 
 fn cancelled(cancel: HANDLE) -> Result<bool> {
@@ -364,3 +437,7 @@ fn read_requests(
 #[cfg(test)]
 #[path = "../../tests/unit/windows/monitor_input.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/windows/shell/read_end.rs"]
+mod shell_read_end_tests;

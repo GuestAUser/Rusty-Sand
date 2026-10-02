@@ -6,6 +6,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
+pub mod analysis;
+
 mod classification;
 mod summary;
 

@@ -80,7 +80,8 @@ impl ProcessController {
 
             loop {
                 if entry.th32OwnerProcessID == self.target_pid {
-                    self.threads.suspend_thread(entry.th32ThreadID)?;
+                    self.threads
+                        .suspend_thread_in_process(entry.th32ThreadID, self.target_pid)?;
                 }
 
                 entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;

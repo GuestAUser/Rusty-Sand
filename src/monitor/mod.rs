@@ -5,7 +5,7 @@ pub mod process;
 pub mod registry;
 
 mod hooks;
-mod input;
+pub(crate) mod input;
 mod lifecycle;
 mod review;
 mod tasks;
@@ -18,7 +18,7 @@ use crate::sandbox::resource::with_cleanup;
 use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 const MAX_RETAINED_EVENTS: usize = 10_000;
 
@@ -62,13 +62,39 @@ impl MonitoringEngine {
         process: ProcessHandle,
         deadline: Deadline,
     ) -> Result<SandboxReport> {
+        self.monitor_process_controlled(process, deadline, None, None)
+            .await
+    }
+
+    /** Share existing retained evidence without installing another producer.
+    Readers must not mutate the analyzer's history or its cursor. */
+    pub(crate) fn retained_events(&self) -> Arc<Mutex<Vec<Event>>> {
+        self.events.clone()
+    }
+
+    /** Owner cancellation traverses the ordinary checked teardown. A stopped
+    execution produces a report only when that teardown succeeds. */
+    pub(crate) async fn monitor_process_controlled(
+        &mut self,
+        process: ProcessHandle,
+        deadline: Deadline,
+        mut stop: Option<oneshot::Receiver<()>>,
+        ready: Option<oneshot::Sender<()>>,
+    ) -> Result<SandboxReport> {
         let mut session = lifecycle::Session::new(process);
         let executable = session.process.executable().to_owned();
         let mut result = deadline
             .run(async {
-                session
-                    .run(&self.config, self.events.clone(), deadline)
-                    .await
+                tokio::select! {
+                    biased;
+                    () = owner_stopped(&mut stop) => Ok(1),
+                    result = session.run(
+                        &self.config,
+                        self.events.clone(),
+                        deadline,
+                        ready,
+                    ) => result,
+                }
             })
             .await;
         if result
@@ -135,6 +161,17 @@ impl MonitoringEngine {
     }
 }
 
+async fn owner_stopped(stop: &mut Option<oneshot::Receiver<()>>) {
+    match stop {
+        Some(stop) => {
+            if stop.await.is_err() {
+                log::debug!("Live execution owner disappeared; stopping its execution");
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/windows/monitor.rs"]
-mod tests;
+pub(crate) mod tests;

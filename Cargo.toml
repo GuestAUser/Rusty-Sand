@@ -29,7 +29,8 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "cargo", "wrap_help"] }
 log = "0.4"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2 = "0.10.9"
 unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]
@@ -49,6 +50,7 @@ windows = { workspace = true, features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Pipes",
@@ -57,8 +59,12 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[build-dependencies]
+cc = "1.2"
+
 [dev-dependencies]
 tempfile = "3.8"
+tokio = { version = "1.0", features = ["io-util", "macros", "process", "rt", "time"] }
 
 [profile.release]
 opt-level = 3

@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Threading::{
-    GetCurrentThreadId, OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+    GetCurrentThreadId, GetProcessIdOfThread, OpenThread, ResumeThread, SuspendThread,
+    THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
 };
 
 struct SuspendedThread {
@@ -22,17 +23,55 @@ impl ThreadSuspender {
     }
 
     pub fn suspend_thread(&mut self, thread_id: u32) -> Result<()> {
+        self.suspend_thread_with_owner(thread_id, None)
+    }
+
+    pub(crate) fn suspend_thread_in_process(
+        &mut self,
+        thread_id: u32,
+        process_id: u32,
+    ) -> Result<()> {
+        self.suspend_thread_with_owner(thread_id, Some(process_id))
+    }
+
+    fn suspend_thread_with_owner(
+        &mut self,
+        thread_id: u32,
+        expected_process_id: Option<u32>,
+    ) -> Result<()> {
         /* SAFETY: This query has no pointer parameters or ownership transfer. */
         if thread_id == unsafe { GetCurrentThreadId() } {
             bail!("Cannot suspend the calling thread");
         }
 
+        let mut access = THREAD_SUSPEND_RESUME;
+
+        if expected_process_id.is_some() {
+            access |= THREAD_QUERY_LIMITED_INFORMATION;
+        }
+
         /* SAFETY: OpenThread returns a newly owned kernel handle. OwnedHandle
-        closes it on every path. SuspendThread borrows it only for the call. */
+        closes it on every path. The owner query and SuspendThread borrow the
+        same retained handle, so TID reuse cannot change the checked identity. */
         let handle = unsafe {
-            let raw = OpenThread(THREAD_SUSPEND_RESUME, false, thread_id)
+            let raw = OpenThread(access, false, thread_id)
                 .with_context(|| format!("Cannot open thread {thread_id}"))?;
             let owned = OwnedHandle::from_raw_handle(raw.0 as _);
+
+            if let Some(expected_process_id) = expected_process_id {
+                let process_id = GetProcessIdOfThread(raw);
+
+                if process_id == 0 {
+                    return Err(windows::core::Error::from_win32())
+                        .with_context(|| format!("Cannot query owner of thread {thread_id}"));
+                }
+
+                if process_id != expected_process_id {
+                    bail!(
+                        "Thread {thread_id} belongs to process {process_id}, not {expected_process_id}"
+                    );
+                }
+            }
 
             if SuspendThread(raw) == u32::MAX {
                 return Err(windows::core::Error::from_win32())

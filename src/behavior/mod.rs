@@ -1,3 +1,4 @@
+pub mod assessment;
 pub mod patterns;
 pub mod rules;
 

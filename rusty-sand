@@ -19,16 +19,20 @@ HELP = """Usage: ./rusty-sand [--launcher-debug] [OPTIONS] EXECUTABLE [-- ARGS..
 
 Runs target/x86_64-pc-windows-gnu/release/rusty_sand.exe in this checkout.
 Build explicitly first; nothing is copied or built automatically.
---launcher-debug selects debug explicitly, never as an automatic fallback.
+--launcher-debug selects the debug build, never as an automatic fallback.
 Linux executable, --workdir/-w and --output/-o paths use wslpath conversion.
 Absolute Windows paths and target arguments after -- are passed unchanged.
 
 Backend options:
+      --static            Inspect bytes without executing the target
+      --debug             Native debugger backend, without API hooks
+      --shell             Analyst shell with live execution controls
+      --restricted        Require a restricted token for execution
   -w, --workdir PATH       Target working directory
   -o, --output PATH        Reports (default: checkout/sandbox_output)
   -t, --timeout SECONDS    Timeout (default: 300)
   -m, --memory MB          Memory limit (default: 1024)
-  -f, --format FORMAT      console, json, or both
+  -f, --format FORMAT      console, json, or both; JSON stays in the output directory
   -i, --internet          Request internet access (also enables DNS)
   -d, --dns               Request DNS access
   -v, --verbose           Debug logging
@@ -39,6 +43,10 @@ Backend options:
 Interactive EOF, SIGINT and SIGTERM cancel and wait for Windows cleanup.
 With --no-interactive, ordinary EOF is ignored; signals still cancel.
 Monitoring is not complete isolation. Use a disposable VM for untrusted programs.
+Static/debug/shell modes are mutually exclusive; --restricted requires execution.
+Debug mode does not enforce hook-based internet or registry policy.
+analysis.json contains bounded evidence, debug.json contains debugger results,
+and ordinary execution retains report.json. Indicators are not malware verdicts.
 """
 
 def windows_path(value, cwd):

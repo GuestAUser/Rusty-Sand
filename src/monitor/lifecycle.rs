@@ -17,7 +17,7 @@ use crate::ui::{self, Panel, PromptEnd, Tone};
 use anyhow::{anyhow, bail, Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 
 pub(super) struct Session {
     observers: Option<MonitorTasks>,
@@ -41,6 +41,7 @@ impl Session {
         config: &SandboxConfig,
         events: Arc<Mutex<Vec<Event>>>,
         deadline: Deadline,
+        ready: Option<oneshot::Sender<()>>,
     ) -> Result<u32> {
         if !self.process.is_suspended {
             bail!("monitoring requires an initially suspended process");
@@ -58,7 +59,7 @@ impl Session {
         tokio::select! {
             biased;
             result = cancelled(&mut status, &mut signal) => result,
-            result = self.run_active(config, events, deadline) => result,
+            result = self.run_active(config, events, deadline, ready) => result,
         }
     }
 
@@ -67,6 +68,7 @@ impl Session {
         config: &SandboxConfig,
         events: Arc<Mutex<Vec<Event>>>,
         deadline: Deadline,
+        ready: Option<oneshot::Sender<()>>,
     ) -> Result<u32> {
         let initialization = ui::terminal().activity("Initializing suspended target")?;
         if config.interactive_mode {
@@ -132,6 +134,11 @@ impl Session {
             Tone::Success,
         )?;
         let running = ui::terminal().activity("Running target and observing activity")?;
+        if let Some(ready) = ready {
+            if ready.send(()).is_err() {
+                log::debug!("Live execution readiness receiver was closed");
+            }
+        }
         let observers = self
             .observers
             .as_mut()

@@ -6,7 +6,7 @@ use std::time::Duration;
 /* Full sessions share the process-wide human terminal, just as the CLI does.
  * Serialize only these terminal-owning integration cases; other platform tests
  * retain parallel execution and do not contend for prompt/activity ownership. */
-static SESSION_TERMINAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static SESSION_TERMINAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn command_interpreter() -> Result<String> {
     let directory = std::env::var_os("SystemRoot").context("Windows directory is unavailable")?;

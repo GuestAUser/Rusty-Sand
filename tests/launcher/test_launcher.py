@@ -83,6 +83,35 @@ class PathTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 launcher.translate_arguments([value], self.cwd)
 
+    def test_backend_modes_are_forwarded_without_selecting_a_debug_build(self):
+        for mode in ("--static", "--debug", "--shell"):
+            with self.subTest(mode=mode):
+                profile, result = launcher.translate_arguments(
+                    [mode, "app.exe", "--", "--debug", "--restricted"], self.cwd
+                )
+                self.assertEqual(profile, "release")
+                self.assertIn(mode, result[:result.index("--")])
+                self.assertIn("WIN:/checkout with spaces/app.exe", result)
+                self.assertEqual(result[result.index("--") + 1:], ["--debug", "--restricted"])
+
+    def test_restricted_and_unknown_flags_are_left_for_backend_validation(self):
+        profile, result = launcher.translate_arguments(
+            ["--debug", "--restricted", "--unknown-analysis-option", "app.exe"], self.cwd
+        )
+        self.assertEqual(profile, "release")
+        self.assertIn("--debug", result)
+        self.assertIn("--restricted", result)
+        self.assertIn("--unknown-analysis-option", result)
+        self.assertEqual(result[-1], "WIN:/checkout with spaces/app.exe")
+
+    def test_debug_backend_and_debug_build_are_independent(self):
+        profile, result = launcher.translate_arguments(
+            ["--launcher-debug", "--debug", "app.exe"], self.cwd
+        )
+        self.assertEqual(profile, "debug")
+        self.assertIn("--debug", result)
+        self.assertNotIn("--launcher-debug", result)
+
 class EntryTests(unittest.TestCase):
     def test_noninteractive_eof_policy_does_not_parse_target_arguments(self):
         for arguments, closes in [

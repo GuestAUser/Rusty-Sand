@@ -6,6 +6,38 @@ fn default_configuration_does_not_request_unsupported_enforcement() {
 }
 
 #[test]
+fn restricted_token_is_opt_in_and_legacy_configuration_remains_unrestricted() {
+    let config = SandboxConfig::new();
+    assert!(!config.restricted_token);
+
+    let mut serialized = serde_json::to_value(&config).unwrap();
+    assert_eq!(serialized["restricted_token"], false);
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("restricted_token");
+
+    let legacy: SandboxConfig = serde_json::from_value(serialized).unwrap();
+    assert!(!legacy.restricted_token);
+    assert_eq!(legacy.validate(), Ok(()));
+}
+
+#[test]
+fn restricted_token_opt_in_survives_configuration_round_trip() {
+    let config = SandboxConfig {
+        restricted_token: true,
+        ..SandboxConfig::default()
+    };
+
+    let serialized = serde_json::to_value(&config).unwrap();
+    assert_eq!(serialized["restricted_token"], true);
+
+    let decoded: SandboxConfig = serde_json::from_value(serialized).unwrap();
+    assert!(decoded.restricted_token);
+    assert_eq!(decoded.validate(), Ok(()));
+}
+
+#[test]
 fn stdin_control_requires_runtime_opt_in_and_is_not_serialized_policy() {
     let mut config = SandboxConfig::new();
     assert!(!config.cancel_on_stdin_eof);

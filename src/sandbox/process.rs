@@ -1,10 +1,15 @@
 use super::command_line::command_line;
+use super::isolation::create_owned_restricted_token;
 use super::resource::{close_handle, with_cleanup, OwnedHandle};
 use crate::config::SandboxConfig;
 use anyhow::{bail, Context, Result};
 use std::os::windows::ffi::OsStrExt;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::System::Diagnostics::Debug::{
+    GetThreadErrorMode, SetThreadErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+    SEM_NOOPENFILEERRORBOX, THREAD_ERROR_MODE,
+};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -13,10 +18,55 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_PROCESS_TIME,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, QueryFullProcessImageNameW, ResumeThread, TerminateProcess,
-    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, PROCESS_INFORMATION,
-    PROCESS_NAME_WIN32, STARTUPINFOW,
+    CreateProcessAsUserW, CreateProcessW, GetExitCodeProcess, QueryFullProcessImageNameW,
+    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    PROCESS_INFORMATION, PROCESS_NAME_WIN32, STARTUPINFOW,
 };
+
+/* A thread-local setting must be restored on the thread that changed it. */
+struct CreationErrorMode {
+    previous: Option<THREAD_ERROR_MODE>,
+    _thread_bound: std::marker::PhantomData<*mut ()>,
+}
+
+impl CreationErrorMode {
+    fn suppress_dialogs() -> Result<Self> {
+        /* SAFETY: Both APIs operate on the calling thread only. Preserve all
+        existing flags and save the actual previous mode reported by Windows. */
+        let current = THREAD_ERROR_MODE(unsafe { GetThreadErrorMode() });
+        let mode =
+            current | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
+        let mut previous = THREAD_ERROR_MODE::default();
+
+        unsafe { SetThreadErrorMode(mode, Some(&mut previous)) }
+            .context("suppress process-creation error dialogs")?;
+
+        Ok(Self {
+            previous: Some(previous),
+            _thread_bound: std::marker::PhantomData,
+        })
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if let Some(previous) = self.previous {
+            /* SAFETY: This guard cannot move to another thread. The mode was
+            obtained from Windows, not assembled from unchecked flag values. */
+            unsafe { SetThreadErrorMode(previous, None) }
+                .context("restore thread error mode after process creation")?;
+            self.previous = None;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for CreationErrorMode {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            log::error!("Thread error-mode cleanup failed: {error:#}");
+        }
+    }
+}
 
 pub struct ProcessHandle {
     pub process_handle: HANDLE,
@@ -32,7 +82,7 @@ impl ProcessHandle {
     pub fn resume_initial_thread(&mut self) -> Result<()> {
         if self.is_suspended {
             /* SAFETY: This object owns the primary thread returned by
-            CreateProcessW; startup has not resumed it elsewhere. */
+            process creation; startup has not resumed it elsewhere. */
             let previous = unsafe { ResumeThread(self.thread_handle) };
             if previous == u32::MAX {
                 return Err(windows::core::Error::from_win32()).context("resume initial thread");
@@ -188,33 +238,80 @@ pub fn create_sandboxed_process(
         return with_cleanup(Err(error), job.close());
     }
 
+    let mut token = if config.restricted_token {
+        match create_owned_restricted_token() {
+            Ok(token) => Some(token),
+            Err(error) => return with_cleanup(Err(error), job.close()),
+        }
+    } else {
+        None
+    };
+
     let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
     };
     let mut information = PROCESS_INFORMATION::default();
+    let mut error_mode = match CreationErrorMode::suppress_dialogs() {
+        Ok(mode) => mode,
+        Err(error) => {
+            let token_closed = token.as_mut().map_or(Ok(()), OwnedHandle::close);
+            return with_cleanup(with_cleanup(Err(error), token_closed), job.close());
+        }
+    };
+
     /* SAFETY: All strings are NUL-terminated and the command line is mutable.
     No handles are inherited. Output handles are owned immediately on success.
-    The explicit application path avoids command-line executable ambiguity. */
+    The explicit application path avoids command-line executable ambiguity.
+    The optional token is an owned restricted primary token, kept alive through
+    CreateProcessAsUserW. Neither branch resumes the initial thread. */
     let created = unsafe {
-        CreateProcessW(
-            PCWSTR(application.as_ptr()),
-            PWSTR(command.as_mut_ptr()),
-            None,
-            None,
-            false,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW,
-            None,
-            directory
-                .as_ref()
-                .map_or(PCWSTR::null(), |path| PCWSTR(path.as_ptr())),
-            &startup,
-            &mut information,
-        )
-    }
-    .context("create suspended process");
+        let directory = directory
+            .as_ref()
+            .map_or(PCWSTR::null(), |path| PCWSTR(path.as_ptr()));
+
+        if let Some(token) = token.as_ref() {
+            CreateProcessAsUserW(
+                token.raw(),
+                PCWSTR(application.as_ptr()),
+                PWSTR(command.as_mut_ptr()),
+                None,
+                None,
+                false,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                None,
+                directory,
+                &startup,
+                &mut information,
+            )
+            .context("create suspended process with restricted primary token")
+        } else {
+            CreateProcessW(
+                PCWSTR(application.as_ptr()),
+                PWSTR(command.as_mut_ptr()),
+                None,
+                None,
+                false,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                None,
+                directory,
+                &startup,
+                &mut information,
+            )
+            .context("create suspended process")
+        }
+    };
+
+    /* The bindings captured the creation error before restoration can change
+    GetLastError. Keep restoration separate from the successful handle result. */
+    let restored = error_mode.restore();
+
     if let Err(error) = created {
-        return with_cleanup(Err(error), job.close());
+        let token_closed = token.as_mut().map_or(Ok(()), OwnedHandle::close);
+        return with_cleanup(
+            with_cleanup(with_cleanup(Err(error), restored), token_closed),
+            job.close(),
+        );
     }
 
     let mut process = ProcessHandle {
@@ -226,6 +323,30 @@ pub fn create_sandboxed_process(
         is_suspended: true,
         image_path: String::new(),
     };
+
+    /*
+     * The process now owns a kernel reference to its primary token. A local
+     * token-close or error-mode restoration failure must still terminate the
+     * newly created, suspended target; neither may discard the process handles
+     * or return success. Attempt token cleanup even if restoration failed.
+     */
+    let token_closed = token.as_mut().map_or(Ok(()), OwnedHandle::close);
+    if let Err(error) = with_cleanup(restored, token_closed) {
+        let terminated = process.terminate(1);
+        let closed = process.close();
+        return with_cleanup(
+            with_cleanup(with_cleanup(Err(error), terminated), closed),
+            job.close(),
+        );
+    }
+
+    finish_suspended_process(process, job)
+}
+
+fn finish_suspended_process(
+    mut process: ProcessHandle,
+    mut job: OwnedHandle,
+) -> Result<ProcessHandle> {
     /* SAFETY: Both kernel handles are owned above. The primary thread has never
     run, so no target-created children can escape this assignment. */
     let assigned = unsafe { AssignProcessToJobObject(job.raw(), process.process_handle) }

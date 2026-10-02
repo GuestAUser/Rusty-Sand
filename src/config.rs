@@ -23,6 +23,17 @@ impl std::error::Error for ConfigError {}
 /// these settings do not establish an isolation boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
+    /**
+    Run the target with a restricted primary token (default: false).
+
+    Removes privileges except SeChangeNotifyPrivilege and makes non-basic
+    groups deny-only. Failure is fatal; execution never falls back to an
+    unrestricted token. This is least privilege, not filesystem, network,
+    desktop, or VM isolation. It does not install low integrity or AppContainer.
+    */
+    #[serde(default)]
+    pub restricted_token: bool,
+
     /// Allow internet access (default: false)
     pub allow_internet: bool,
 
@@ -83,6 +94,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            restricted_token: false,
             allow_internet: false,
             allow_dns: false,
             allow_registry: true,

@@ -5,10 +5,14 @@
 //! substitutes that cannot provide the documented operating-system behavior.
 
 pub mod analysis;
+#[cfg(windows)]
+pub mod analyst;
 pub mod behavior;
 pub mod config;
 #[cfg(windows)]
 pub mod control;
+#[cfg(windows)]
+pub mod debugger;
 #[cfg(windows)]
 pub mod injection;
 pub mod ipc;
@@ -18,6 +22,11 @@ pub mod report;
 #[cfg(windows)]
 pub mod sandbox;
 pub mod ui;
+
+#[cfg(windows)]
+pub mod live;
+#[cfg(windows)]
+pub mod shell;
 
 pub use config::SandboxConfig;
 pub use report::SandboxReport;
